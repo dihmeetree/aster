@@ -1,0 +1,43 @@
+[package]
+name = "aster-db"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A high-performance graph database with Poly-LSM storage engine"
+license = "MIT"
+repository = "https://github.com/yourusername/aster-db"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+dashmap = "5.5"
+parking_lot = "0.12"
+crossbeam = "0.8"
+rand = "0.8"
+ahash = "0.8"
+bytes = "1.0"
+memmap2 = "0.9"
+crc32fast = "1.3"
+lz4 = "1.24"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.0"
+proptest = "1.0"
+
+[lib]
+name = "aster_db"
+path = "src/lib.rs"
+
+[[example]]
+name = "recommendation_engine"
+path = "examples/recommendation_engine.rs"

@@ -1,0 +1,18 @@
+{
+  "workbench.colorTheme": "One Dark Pro",
+  "editor.fontSize": 18,
+  "editor.codeLens": false,
+  "terminal.integrated.fontSize": 18,
+  "workbench.editor.enablePreview": false,
+  "javascript.updateImportsOnFileMove.enabled": "always",
+  "editor.formatOnSave": true,
+  "workbench.activityBar.location": "top",
+  "css.validate": false,
+  "editor.inlayHints.enabled": "offUnlessPressed",
+  "remote.autoForwardPorts": false,
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "always"
+  },
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "terminal.integrated.defaultProfile.windows": "Command Prompt"
+}
