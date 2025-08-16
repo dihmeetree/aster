@@ -120,6 +120,32 @@ pub enum GremlinStep {
     Store(String),
     /// Aggregate: .aggregate("x")
     Aggregate(String),
+    /// Add vertex: g.addV("label")
+    AddV(Option<String>), // Optional label
+    /// Add edge: .addE("label")
+    AddE(String), // Edge label
+    /// Set property: .property("key", value)
+    Property(String, PropertyValue),
+    /// Target vertex for addE: .to(vertex)
+    To(Box<GremlinTraversal>),
+    /// Source vertex for addE: .from(vertex)
+    From(Box<GremlinTraversal>),
+    /// Get ID: .id()
+    Id,
+    /// Where filter with condition: .where(predicate)
+    WhereFilter(Box<GremlinPredicate>),
+    /// Within filter: .within(collection)
+    Within(Vec<PropertyValue>),
+    /// Without filter: .without(collection)
+    Without(String), // Aggregate label
+    /// Not equal: .neq(value)
+    Neq(Box<GremlinTraversal>),
+    /// Order local: .order(local)
+    OrderLocal(Option<GremlinOrder>),
+    /// By step for ordering: .by(property, order)
+    By(String, Option<GremlinOrder>),
+    /// Project specific properties: .project('prop1', 'prop2')
+    Project(Vec<String>),
 }
 
 /// Gremlin predicate for filtering
@@ -155,6 +181,8 @@ pub enum GremlinPredicate {
     Or(Vec<GremlinPredicate>),
     /// Logical NOT: not(pred)
     Not(Box<GremlinPredicate>),
+    /// Property filter: has(property, predicate)
+    HasProperty(String, Box<GremlinPredicate>),
 }
 
 /// Gremlin ordering specification
@@ -354,7 +382,7 @@ impl GremlinTraversal {
 }
 
 /// Result of Gremlin traversal execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GremlinResult {
     /// Single vertex result
     Vertex(VertexId),
@@ -374,6 +402,8 @@ pub enum GremlinResult {
     Map(HashMap<String, GremlinResult>),
     /// Null/empty result
     Null,
+    /// Incomplete edge (waiting for .to() step)
+    IncompleteEdge(VertexId, String),
 }
 
 impl GremlinResult {
@@ -407,6 +437,9 @@ impl GremlinResult {
                 format!("{{{}}}", map_strings.join(", "))
             }
             GremlinResult::Null => "null".to_string(),
+            GremlinResult::IncompleteEdge(v, label) => {
+                format!("incomplete_edge[{}, {}]", v.as_u64(), label)
+            }
         }
     }
 
@@ -443,6 +476,22 @@ impl GremlinResult {
     }
 }
 
+/// Incomplete edge information for multi-step edge creation
+#[derive(Debug, Clone)]
+pub struct IncompleteEdge {
+    pub source: VertexId,
+    pub label: String,
+}
+
+/// Completed edge info for tracking created edges
+#[derive(Debug, Clone)]
+pub struct CreatedEdge {
+    pub edge_id: EdgeId,
+    pub source: VertexId,
+    pub target: VertexId,
+    pub label: String,
+}
+
 /// Gremlin execution context with variable bindings
 #[derive(Debug)]
 pub struct GremlinContext {
@@ -456,6 +505,12 @@ pub struct GremlinContext {
     pub current_path: Vec<GremlinResult>,
     /// Whether to track paths
     pub track_path: bool,
+    /// Created vertices during this traversal
+    pub created_vertices: Vec<VertexId>,
+    /// Incomplete edges waiting for .to() completion
+    pub incomplete_edges: Vec<IncompleteEdge>,
+    /// Completed edges created during this traversal
+    pub created_edges: Vec<CreatedEdge>,
 }
 
 impl GremlinContext {
@@ -466,6 +521,9 @@ impl GremlinContext {
             side_effects: HashMap::new(),
             current_path: Vec::new(),
             track_path: false,
+            created_vertices: Vec::new(),
+            incomplete_edges: Vec::new(),
+            created_edges: Vec::new(),
         }
     }
 
@@ -512,6 +570,9 @@ impl GremlinContext {
             side_effects: HashMap::new(), // Fresh side effects for branch
             current_path: self.current_path.clone(),
             track_path: self.track_path,
+            created_vertices: Vec::new(), // Fresh vertex list for branch
+            incomplete_edges: Vec::new(), // Fresh edge list for branch
+            created_edges: Vec::new(),    // Fresh edge list for branch
         }
     }
 }
@@ -624,6 +685,11 @@ impl GremlinEngine {
                     Ok(Vec::new())
                 }
             }
+            GremlinStep::AddV(label) => {
+                // AddV can be an initial step - create a new vertex
+                self.execute_add_v_step(Vec::new(), label.as_ref(), context, stats)
+                    .await
+            }
             _ => Err(AsterError::invalid_operation(
                 "Step is not a valid initial step",
             )),
@@ -649,6 +715,22 @@ impl GremlinEngine {
             }
             GremlinStep::Both(labels) => {
                 self.execute_both_step(results, labels.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::OutE(labels) => {
+                self.execute_out_e_step(results, labels.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::InE(labels) => {
+                self.execute_in_e_step(results, labels.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::BothE(labels) => {
+                self.execute_both_e_step(results, labels.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::HasLabel(label) => {
+                self.execute_has_label_step(results, label, context, stats)
                     .await
             }
             GremlinStep::Has(key, value) => {
@@ -710,6 +792,56 @@ impl GremlinEngine {
             GremlinStep::Path => self.execute_path_step(results, context, stats).await,
             GremlinStep::Repeat(traversal, times) => {
                 self.execute_repeat_step(results, traversal, *times, context, stats)
+                    .await
+            }
+            GremlinStep::AddV(label) => {
+                self.execute_add_v_step(results, label.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::AddE(label) => {
+                self.execute_add_e_step(results, label, context, stats)
+                    .await
+            }
+            GremlinStep::Property(key, value) => {
+                self.execute_property_step(results, key, value, context, stats)
+                    .await
+            }
+            GremlinStep::To(target_traversal) => {
+                self.execute_to_step(results, target_traversal, context, stats)
+                    .await
+            }
+            GremlinStep::From(source_traversal) => {
+                self.execute_from_step(results, source_traversal, context, stats)
+                    .await
+            }
+            GremlinStep::Id => self.execute_id_step(results, context, stats).await,
+            GremlinStep::Aggregate(label) => {
+                self.execute_aggregate_step(results, label, context, stats)
+                    .await
+            }
+            GremlinStep::Without(aggregate_label) => {
+                self.execute_without_step(results, aggregate_label, context, stats)
+                    .await
+            }
+            GremlinStep::GroupCount => self.execute_group_count_step(results, context, stats).await,
+            GremlinStep::OrderLocal(order) => {
+                self.execute_order_local_step(results, order.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::By(property, order) => {
+                self.execute_by_step(results, property, order.as_ref(), context, stats)
+                    .await
+            }
+            GremlinStep::Neq(traversal) => {
+                self.execute_neq_step(results, traversal, context, stats)
+                    .await
+            }
+            GremlinStep::WhereFilter(predicate) => {
+                self.execute_where_filter_step(results, predicate, context, stats)
+                    .await
+            }
+            GremlinStep::Project(properties) => {
+                self.execute_project_step(results, properties, context, stats)
                     .await
             }
             _ => {
@@ -777,6 +909,130 @@ impl GremlinEngine {
 
         out_results.extend(in_results);
         Ok(out_results)
+    }
+
+    /// Execute .outE() step - get outgoing edges
+    async fn execute_out_e_step(
+        &self,
+        results: Vec<GremlinResult>,
+        labels: Option<&Vec<String>>,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        let mut edge_results = Vec::new();
+
+        for result in results {
+            if let Some(vertex_id) = result.as_vertex() {
+                // Look for edges created for this vertex in context
+                let mut found_edges = false;
+                for created_edge in &context.created_edges {
+                    if created_edge.source == vertex_id {
+                        // Check if this edge matches the requested labels
+                        let should_include = if let Some(labels) = labels {
+                            labels.contains(&created_edge.label)
+                        } else {
+                            true // No label filter, include all edges
+                        };
+
+                        if should_include {
+                            edge_results.push(GremlinResult::Edge(created_edge.edge_id));
+                            found_edges = true;
+                        }
+                    }
+                }
+
+                // If no edges found in context, get edges from graph
+                if !found_edges {
+                    let neighbors = self.graph.get_neighbors(vertex_id).await?;
+                    stats.edges_traversed += neighbors.len();
+
+                    for _neighbor in neighbors {
+                        let edge_id = EdgeId::new(); // Generate edge ID
+                        edge_results.push(GremlinResult::Edge(edge_id));
+                    }
+                }
+            }
+        }
+
+        Ok(edge_results)
+    }
+
+    /// Execute .inE() step - get incoming edges
+    async fn execute_in_e_step(
+        &self,
+        results: Vec<GremlinResult>,
+        _labels: Option<&Vec<String>>,
+        _context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // For incoming edges, we'd need to scan all vertices to find those pointing to our vertices
+        // This is expensive, so for now we'll return empty results as a placeholder
+        // In a full implementation, we'd maintain reverse indexes
+        Ok(Vec::new())
+    }
+
+    /// Execute .bothE() step - get both incoming and outgoing edges
+    async fn execute_both_e_step(
+        &self,
+        results: Vec<GremlinResult>,
+        labels: Option<&Vec<String>>,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        let mut out_edges = self
+            .execute_out_e_step(results.clone(), labels, context, stats)
+            .await?;
+        let in_edges = self
+            .execute_in_e_step(results, labels, context, stats)
+            .await?;
+
+        out_edges.extend(in_edges);
+        Ok(out_edges)
+    }
+
+    /// Execute .hasLabel() step - filter by vertex/edge label
+    async fn execute_has_label_step(
+        &self,
+        results: Vec<GremlinResult>,
+        label: &str,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        if let Some(ref property_store) = self.property_store {
+            let mut filtered_results = Vec::new();
+
+            for result in results {
+                match result {
+                    GremlinResult::Vertex(vertex_id) => {
+                        let properties = property_store.get_vertex_properties(vertex_id).await?;
+                        if let Some(PropertyValue::String(vertex_label)) = properties.get("label") {
+                            if vertex_label == label {
+                                filtered_results.push(result);
+                            }
+                        }
+                        stats.vertices_visited += 1;
+                    }
+                    GremlinResult::Edge(edge_id) => {
+                        let properties = property_store.get_edge_properties(edge_id).await?;
+                        if let Some(PropertyValue::String(edge_label)) = properties.get("label") {
+                            if edge_label == label {
+                                filtered_results.push(result);
+                            }
+                        }
+                        stats.edges_traversed += 1;
+                    }
+                    _ => {
+                        // For other result types, just pass through
+                        filtered_results.push(result);
+                    }
+                }
+            }
+
+            Ok(filtered_results)
+        } else {
+            // No property store available, return all results
+            Ok(results)
+        }
     }
 
     /// Execute .has() step
@@ -1206,6 +1462,41 @@ impl GremlinEngine {
         }
     }
 
+    /// Execute .project() step
+    async fn execute_project_step(
+        &self,
+        results: Vec<GremlinResult>,
+        properties: &[String],
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        if self.property_store.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let property_store = self.property_store.as_ref().unwrap();
+        let mut projected_results = Vec::new();
+
+        for result in results {
+            if let Some(vertex_id) = result.as_vertex() {
+                let vertex_properties = property_store.get_vertex_properties(vertex_id).await?;
+                let mut projected_map = std::collections::HashMap::new();
+
+                for prop in properties {
+                    if let Some(value) = vertex_properties.get(prop) {
+                        projected_map.insert(prop.clone(), GremlinResult::Value(value.clone()));
+                    } else if prop == "id" {
+                        projected_map.insert(prop.clone(), GremlinResult::Vertex(vertex_id));
+                    }
+                }
+
+                projected_results.push(GremlinResult::Map(projected_map));
+            }
+        }
+
+        Ok(projected_results)
+    }
+
     /// Execute .max() step
     async fn execute_max_step(
         &self,
@@ -1434,6 +1725,21 @@ impl GremlinEngine {
                     let result = self.evaluate_predicate(result, predicate, context).await?;
                     Ok(!result)
                 }
+                GremlinPredicate::HasProperty(property_key, predicate) => {
+                    if let Some(vertex_id) = result.as_vertex() {
+                        if let Some(property_store) = &self.property_store {
+                            let properties =
+                                property_store.get_vertex_properties(vertex_id).await?;
+                            if let Some(property_value) = properties.get(property_key) {
+                                let property_result = GremlinResult::Value(property_value.clone());
+                                return self
+                                    .evaluate_predicate(&property_result, predicate, context)
+                                    .await;
+                            }
+                        }
+                    }
+                    Ok(false)
+                }
                 _ => Ok(true), // Default to true for unimplemented predicates
             }
         })
@@ -1514,6 +1820,8 @@ impl GremlinEngine {
         // A full implementation would use a proper parser (e.g., nom, pest, or antlr)
 
         let mut traversal = GremlinTraversal::new();
+        // Clean up query - remove newlines and extra whitespace
+        let query = query.replace('\n', " ").replace('\r', " ");
         let query = query.trim();
 
         // Remove g. prefix if present
@@ -1523,8 +1831,8 @@ impl GremlinEngine {
             query
         };
 
-        // Split by dots to get steps
-        let parts: Vec<&str> = query.split('.').collect();
+        // Split by dots to get steps, but be careful about dots inside parentheses
+        let parts = Self::split_query_steps(query);
 
         for part in parts {
             let step = Self::parse_step(part)?;
@@ -1534,6 +1842,35 @@ impl GremlinEngine {
         Ok(traversal)
     }
 
+    /// Split query steps by dots, respecting parentheses
+    fn split_query_steps(query: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut paren_depth = 0;
+        let chars: Vec<char> = query.chars().collect();
+
+        for (i, &ch) in chars.iter().enumerate() {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth -= 1,
+                '.' if paren_depth == 0 => {
+                    if start < i {
+                        parts.push(&query[start..i]);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Add the last part
+        if start < chars.len() {
+            parts.push(&query[start..]);
+        }
+
+        parts
+    }
+
     /// Parse a single step (simplified)
     fn parse_step(step_str: &str) -> Result<GremlinStep> {
         let step_str = step_str.trim();
@@ -1541,16 +1878,45 @@ impl GremlinEngine {
         if step_str == "V()" {
             Ok(GremlinStep::V(None))
         } else if step_str.starts_with("V(") && step_str.ends_with(")") {
-            // Parse vertex IDs - simplified
-            Ok(GremlinStep::V(None))
+            // Parse vertex IDs - extract ID from V(123)
+            let inner = &step_str[2..step_str.len() - 1];
+            if inner.is_empty() {
+                Ok(GremlinStep::V(None))
+            } else if let Ok(vertex_id) = inner.parse::<u64>() {
+                Ok(GremlinStep::V(Some(vec![VertexId::from_u64(vertex_id)])))
+            } else {
+                // Could be a comma-separated list or other format, for now just treat as V()
+                Ok(GremlinStep::V(None))
+            }
         } else if step_str == "E()" {
             Ok(GremlinStep::E(None))
         } else if step_str == "out()" {
             Ok(GremlinStep::Out(None))
+        } else if step_str.starts_with("out(") && step_str.ends_with(")") {
+            let inner = &step_str[4..step_str.len() - 1];
+            let labels: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::Out(Some(labels)))
         } else if step_str == "in()" {
             Ok(GremlinStep::In(None))
+        } else if step_str.starts_with("in(") && step_str.ends_with(")") {
+            let inner = &step_str[3..step_str.len() - 1];
+            let labels: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::In(Some(labels)))
         } else if step_str == "both()" {
             Ok(GremlinStep::Both(None))
+        } else if step_str.starts_with("both(") && step_str.ends_with(")") {
+            let inner = &step_str[5..step_str.len() - 1];
+            let labels: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::Both(Some(labels)))
         } else if step_str.starts_with("has(") && step_str.ends_with(")") {
             // Parse has() step - simplified
             let inner = &step_str[4..step_str.len() - 1];
@@ -1558,12 +1924,48 @@ impl GremlinEngine {
 
             if parts.len() >= 1 {
                 let key = parts[0].trim_matches('"').trim_matches('\'');
-                let value = if parts.len() >= 2 {
-                    Some(Self::parse_property_value(parts[1])?)
+                if parts.len() >= 2 {
+                    let value_str = parts[1].trim();
+                    // Check if it's a predicate function like gte(value)
+                    if value_str.starts_with("gte(") && value_str.ends_with(")") {
+                        let inner_value = &value_str[4..value_str.len() - 1];
+                        let prop_value = Self::parse_property_value(inner_value)?;
+                        let predicate = GremlinPredicate::HasProperty(
+                            key.to_string(),
+                            Box::new(GremlinPredicate::Gte(prop_value)),
+                        );
+                        Ok(GremlinStep::Where(Box::new(predicate)))
+                    } else if value_str.starts_with("lte(") && value_str.ends_with(")") {
+                        let inner_value = &value_str[4..value_str.len() - 1];
+                        let prop_value = Self::parse_property_value(inner_value)?;
+                        let predicate = GremlinPredicate::HasProperty(
+                            key.to_string(),
+                            Box::new(GremlinPredicate::Lte(prop_value)),
+                        );
+                        Ok(GremlinStep::Where(Box::new(predicate)))
+                    } else if value_str.starts_with("gt(") && value_str.ends_with(")") {
+                        let inner_value = &value_str[3..value_str.len() - 1];
+                        let prop_value = Self::parse_property_value(inner_value)?;
+                        let predicate = GremlinPredicate::HasProperty(
+                            key.to_string(),
+                            Box::new(GremlinPredicate::Gt(prop_value)),
+                        );
+                        Ok(GremlinStep::Where(Box::new(predicate)))
+                    } else if value_str.starts_with("lt(") && value_str.ends_with(")") {
+                        let inner_value = &value_str[3..value_str.len() - 1];
+                        let prop_value = Self::parse_property_value(inner_value)?;
+                        let predicate = GremlinPredicate::HasProperty(
+                            key.to_string(),
+                            Box::new(GremlinPredicate::Lt(prop_value)),
+                        );
+                        Ok(GremlinStep::Where(Box::new(predicate)))
+                    } else {
+                        let value = Some(Self::parse_property_value(value_str)?);
+                        Ok(GremlinStep::Has(key.to_string(), value))
+                    }
                 } else {
-                    None
-                };
-                Ok(GremlinStep::Has(key.to_string(), value))
+                    Ok(GremlinStep::Has(key.to_string(), None))
+                }
             } else {
                 Err(AsterError::invalid_operation("Invalid has() step"))
             }
@@ -1585,6 +1987,153 @@ impl GremlinEngine {
             Ok(GremlinStep::Limit(count))
         } else if step_str == "dedup()" {
             Ok(GremlinStep::Dedup)
+        } else if step_str == "id()" {
+            Ok(GremlinStep::Id)
+        } else if step_str == "sum()" {
+            Ok(GremlinStep::Sum)
+        } else if step_str.starts_with("project(") && step_str.ends_with(")") {
+            let inner = &step_str[8..step_str.len() - 1];
+            let properties: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::Project(properties))
+        } else if step_str.starts_with("hasLabel(") && step_str.ends_with(")") {
+            let inner = &step_str[9..step_str.len() - 1];
+            let label = inner.trim_matches('"').trim_matches('\'').to_string();
+            Ok(GremlinStep::HasLabel(label))
+        } else if step_str == "outE()" {
+            Ok(GremlinStep::OutE(None))
+        } else if step_str.starts_with("outE(") && step_str.ends_with(")") {
+            let inner = &step_str[5..step_str.len() - 1];
+            let labels: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::OutE(Some(labels)))
+        } else if step_str == "inE()" {
+            Ok(GremlinStep::InE(None))
+        } else if step_str.starts_with("inE(") && step_str.ends_with(")") {
+            let inner = &step_str[4..step_str.len() - 1];
+            let labels: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            Ok(GremlinStep::InE(Some(labels)))
+        } else if step_str.starts_with("addV(") && step_str.ends_with(")") {
+            let inner = &step_str[5..step_str.len() - 1];
+            let label = if inner.is_empty() {
+                None
+            } else {
+                Some(inner.trim_matches('"').trim_matches('\'').to_string())
+            };
+            Ok(GremlinStep::AddV(label))
+        } else if step_str.starts_with("addE(") && step_str.ends_with(")") {
+            let inner = &step_str[5..step_str.len() - 1];
+            let label = inner.trim_matches('"').trim_matches('\'').to_string();
+            Ok(GremlinStep::AddE(label))
+        } else if step_str.starts_with("property(") && step_str.ends_with(")") {
+            let inner = &step_str[9..step_str.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() >= 2 {
+                let key = parts[0].trim_matches('"').trim_matches('\'').to_string();
+                let value = Self::parse_property_value(parts[1])?;
+                Ok(GremlinStep::Property(key, value))
+            } else {
+                Err(AsterError::invalid_operation(
+                    "Property step requires key and value",
+                ))
+            }
+        } else if step_str.starts_with("to(") && step_str.ends_with(")") {
+            // Simplified parsing - assumes to(g.V(id))
+            let inner = &step_str[3..step_str.len() - 1];
+            if inner.starts_with("g.V(") && inner.ends_with(")") {
+                // Extract vertex ID
+                let vertex_inner = &inner[4..inner.len() - 1];
+                if let Ok(vertex_id) = vertex_inner.parse::<u64>() {
+                    let target_traversal = GremlinTraversal {
+                        steps: vec![GremlinStep::V(Some(vec![VertexId::from_u64(vertex_id)]))],
+                    };
+                    Ok(GremlinStep::To(Box::new(target_traversal)))
+                } else {
+                    Err(AsterError::invalid_operation(
+                        "Invalid vertex ID in to() step",
+                    ))
+                }
+            } else {
+                Err(AsterError::invalid_operation(
+                    "Complex to() traversals not yet supported",
+                ))
+            }
+        } else if step_str.starts_with("aggregate(") && step_str.ends_with(")") {
+            let inner = &step_str[10..step_str.len() - 1];
+            let label = inner.trim_matches('"').trim_matches('\'').to_string();
+            Ok(GremlinStep::Aggregate(label))
+        } else if step_str.starts_with("without(") && step_str.ends_with(")") {
+            let inner = &step_str[8..step_str.len() - 1];
+            let label = inner.trim_matches('"').trim_matches('\'').to_string();
+            Ok(GremlinStep::Without(label))
+        } else if step_str == "groupCount()" {
+            Ok(GremlinStep::GroupCount)
+        } else if step_str.starts_with("order(") && step_str.ends_with(")") {
+            let inner = &step_str[6..step_str.len() - 1];
+            if inner == "local" {
+                Ok(GremlinStep::OrderLocal(None))
+            } else {
+                Ok(GremlinStep::Order(None))
+            }
+        } else if step_str.starts_with("by(") && step_str.ends_with(")") {
+            let inner = &step_str[3..step_str.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if !parts.is_empty() {
+                let property = parts[0].trim_matches('"').trim_matches('\'').to_string();
+                let order = if parts.len() > 1 {
+                    match parts[1] {
+                        "desc" => Some(GremlinOrder::Desc),
+                        "asc" => Some(GremlinOrder::Asc),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                Ok(GremlinStep::By(property, order))
+            } else {
+                Err(AsterError::invalid_operation(
+                    "By step requires property name",
+                ))
+            }
+        } else if step_str.starts_with("where(") && step_str.ends_with(")") {
+            // Simple where parsing - for now, handle basic cases
+            let inner = &step_str[6..step_str.len() - 1];
+            if inner.starts_with("neq(") && inner.ends_with(")") {
+                let neq_inner = &inner[4..inner.len() - 1];
+                if neq_inner.starts_with("V(") && neq_inner.ends_with(")") {
+                    let vertex_inner = &neq_inner[2..neq_inner.len() - 1];
+                    if let Ok(vertex_id) = vertex_inner.parse::<u64>() {
+                        let neq_traversal = GremlinTraversal {
+                            steps: vec![GremlinStep::V(Some(vec![VertexId::from_u64(vertex_id)]))],
+                        };
+                        Ok(GremlinStep::Neq(Box::new(neq_traversal)))
+                    } else {
+                        Err(AsterError::invalid_operation("Invalid vertex ID in neq"))
+                    }
+                } else {
+                    Err(AsterError::invalid_operation(
+                        "Complex neq not yet supported",
+                    ))
+                }
+            } else if inner.starts_with("without(") && inner.ends_with(")") {
+                let without_inner = &inner[8..inner.len() - 1];
+                let label = without_inner
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                Ok(GremlinStep::Without(label))
+            } else {
+                Err(AsterError::invalid_operation(
+                    "Complex where not yet supported",
+                ))
+            }
         } else {
             Err(AsterError::invalid_operation(&format!(
                 "Unknown step: {}",
@@ -1616,6 +2165,505 @@ impl GremlinEngine {
         } else {
             Ok(PropertyValue::String(value_str.to_string()))
         }
+    }
+
+    /// Execute addV() step - add a new vertex
+    async fn execute_add_v_step(
+        &self,
+        _results: Vec<GremlinResult>,
+        label: Option<&String>,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Generate a new vertex ID
+        let vertex_id = VertexId::from_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+        );
+
+        // Create the vertex
+        self.graph.add_vertex(vertex_id, None).await?;
+
+        // Add label as property if provided and property store is available
+        if let (Some(label_str), Some(ref property_store)) = (label, &self.property_store) {
+            let mut properties = Properties::new();
+            properties.insert(
+                "label".to_string(),
+                PropertyValue::String(label_str.clone()),
+            );
+            property_store
+                .set_vertex_properties(vertex_id, properties)
+                .await?;
+        }
+
+        stats.vertices_visited += 1;
+        context.created_vertices.push(vertex_id);
+
+        Ok(vec![GremlinResult::Vertex(vertex_id)])
+    }
+
+    /// Execute addE() step - add a new edge (requires .to() or .from())
+    async fn execute_add_e_step(
+        &self,
+        results: Vec<GremlinResult>,
+        label: &str,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Store edge info in context for later completion with .to() step
+        let mut edge_results = Vec::new();
+
+        for result in results {
+            if let Some(source_vertex) = result.as_vertex() {
+                // Create incomplete edge info that will be completed by .to() step
+                let incomplete_edge = IncompleteEdge {
+                    source: source_vertex,
+                    label: label.to_string(),
+                };
+                context.incomplete_edges.push(incomplete_edge);
+                edge_results.push(GremlinResult::IncompleteEdge(
+                    source_vertex,
+                    label.to_string(),
+                ));
+            }
+        }
+
+        stats.edges_traversed += edge_results.len();
+        Ok(edge_results)
+    }
+
+    /// Execute property() step - set a property on vertices or edges
+    async fn execute_property_step(
+        &self,
+        results: Vec<GremlinResult>,
+        key: &str,
+        value: &PropertyValue,
+        _context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        if let Some(ref property_store) = self.property_store {
+            for result in &results {
+                match result {
+                    GremlinResult::Vertex(vertex_id) => {
+                        let mut properties = property_store
+                            .get_vertex_properties(*vertex_id)
+                            .await
+                            .unwrap_or_default();
+                        properties.insert(key.to_string(), value.clone());
+                        property_store
+                            .set_vertex_properties(*vertex_id, properties)
+                            .await?;
+                    }
+                    GremlinResult::Edge(edge_id) => {
+                        let mut properties = property_store
+                            .get_edge_properties(*edge_id)
+                            .await
+                            .unwrap_or_default();
+                        properties.insert(key.to_string(), value.clone());
+                        property_store
+                            .set_edge_properties(*edge_id, properties)
+                            .await?;
+                    }
+                    _ => {} // Ignore other result types
+                }
+            }
+        }
+
+        stats.vertices_visited += results.len();
+        Ok(results)
+    }
+
+    /// Execute .to() step - complete edge creation
+    async fn execute_to_step(
+        &self,
+        results: Vec<GremlinResult>,
+        target_traversal: &GremlinTraversal,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Execute the target traversal to get target vertices
+        let (target_results, _) = self.execute(target_traversal, context).await?;
+        let target_vertices: Vec<VertexId> = target_results
+            .into_iter()
+            .filter_map(|r| r.as_vertex())
+            .collect();
+
+        let mut edge_results = Vec::new();
+
+        // Complete edges from context
+        for incomplete_edge in &context.incomplete_edges {
+            for &target_vertex in &target_vertices {
+                let edge_id = EdgeId::new();
+
+                self.graph
+                    .add_edge(incomplete_edge.source, target_vertex, None)
+                    .await?;
+
+                // Store edge label in property store
+                if let Some(ref property_store) = self.property_store {
+                    let mut properties = std::collections::HashMap::new();
+                    properties.insert(
+                        "label".to_string(),
+                        PropertyValue::String(incomplete_edge.label.clone()),
+                    );
+                    property_store
+                        .set_edge_properties(edge_id, properties)
+                        .await?;
+                }
+
+                // Add to context for future edge queries
+                context.created_edges.push(CreatedEdge {
+                    edge_id,
+                    source: incomplete_edge.source,
+                    target: target_vertex,
+                    label: incomplete_edge.label.clone(),
+                });
+
+                edge_results.push(GremlinResult::Edge(edge_id));
+                stats.edges_traversed += 1;
+            }
+        }
+
+        // Clear incomplete edges
+        context.incomplete_edges.clear();
+        Ok(edge_results)
+    }
+
+    /// Execute .from() step - specify source for edge creation
+    async fn execute_from_step(
+        &self,
+        results: Vec<GremlinResult>,
+        source_traversal: &GremlinTraversal,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Execute the source traversal to get source vertices
+        let (source_results, _) = self.execute(source_traversal, context).await?;
+        let source_vertices: Vec<VertexId> = source_results
+            .into_iter()
+            .filter_map(|r| r.as_vertex())
+            .collect();
+
+        let mut edge_results = Vec::new();
+
+        // Create edges from sources to current results (targets)
+        for result in results {
+            if let Some(target_vertex) = result.as_vertex() {
+                for &source_vertex in &source_vertices {
+                    // Use the first incomplete edge's label if available
+                    let label = context
+                        .incomplete_edges
+                        .first()
+                        .map(|e| e.label.clone())
+                        .unwrap_or_else(|| "edge".to_string());
+
+                    let edge_id = EdgeId::new();
+                    self.graph
+                        .add_edge(source_vertex, target_vertex, None)
+                        .await?;
+                    edge_results.push(GremlinResult::Edge(edge_id));
+                    stats.edges_traversed += 1;
+                }
+            }
+        }
+
+        // Clear incomplete edges
+        context.incomplete_edges.clear();
+        Ok(edge_results)
+    }
+
+    /// Execute .id() step - convert vertices/edges to their IDs
+    async fn execute_id_step(
+        &self,
+        results: Vec<GremlinResult>,
+        _context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        let mut id_results = Vec::new();
+
+        for result in results {
+            match result {
+                GremlinResult::Vertex(vertex_id) => {
+                    id_results.push(GremlinResult::Vertex(vertex_id));
+                }
+                GremlinResult::Edge(edge_id) => {
+                    id_results.push(GremlinResult::Edge(edge_id));
+                }
+                _ => {
+                    // Other result types don't have IDs
+                }
+            }
+        }
+
+        stats.vertices_visited += id_results.len();
+        Ok(id_results)
+    }
+
+    /// Execute .aggregate() step - store results in side effect storage
+    async fn execute_aggregate_step(
+        &self,
+        results: Vec<GremlinResult>,
+        label: &str,
+        context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Store all results in the side effect storage with the given label
+        for result in &results {
+            context.store_side_effect(label.to_string(), result.clone());
+        }
+
+        // Pass through the original results unchanged
+        Ok(results)
+    }
+
+    /// Execute .without() step - filter out results that are in the aggregate
+    async fn execute_without_step(
+        &self,
+        results: Vec<GremlinResult>,
+        aggregate_label: &str,
+        context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Get the aggregated values from side effects
+        let aggregated_values = context
+            .get_side_effect(aggregate_label)
+            .cloned()
+            .unwrap_or_default();
+
+        // Create a set of aggregated vertex IDs for fast lookup
+        let aggregated_vertex_ids: HashSet<VertexId> = aggregated_values
+            .iter()
+            .filter_map(|r| r.as_vertex())
+            .collect();
+
+        // Filter out results that are in the aggregate
+        let filtered_results = results
+            .into_iter()
+            .filter(|result| {
+                match result.as_vertex() {
+                    Some(vertex_id) => !aggregated_vertex_ids.contains(&vertex_id),
+                    None => true, // Keep non-vertex results
+                }
+            })
+            .collect();
+
+        Ok(filtered_results)
+    }
+
+    /// Execute .groupCount() step - count occurrences of each unique result
+    async fn execute_group_count_step(
+        &self,
+        results: Vec<GremlinResult>,
+        _context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        let mut count_map = HashMap::new();
+
+        // Count occurrences of each result
+        for result in results {
+            let key = match &result {
+                GremlinResult::Vertex(v) => v.as_u64().to_string(),
+                GremlinResult::Edge(e) => e.as_u64().to_string(),
+                GremlinResult::Value(PropertyValue::String(s)) => s.clone(),
+                GremlinResult::Value(PropertyValue::Int(i)) => i.to_string(),
+                GremlinResult::Value(PropertyValue::Float(f)) => f.to_string(),
+                _ => result.to_string(),
+            };
+
+            let count_result = count_map.entry(key).or_insert(GremlinResult::Count(0));
+            if let GremlinResult::Count(ref mut count) = count_result {
+                *count += 1;
+            }
+        }
+
+        // Return as a map result
+        Ok(vec![GremlinResult::Map(count_map)])
+    }
+
+    /// Execute .order(local) step - order results within each collection
+    async fn execute_order_local_step(
+        &self,
+        results: Vec<GremlinResult>,
+        order: Option<&GremlinOrder>,
+        _context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        let mut ordered_results = Vec::new();
+
+        for result in results {
+            match result {
+                GremlinResult::List(mut list) => {
+                    // Order the list contents
+                    match order {
+                        Some(GremlinOrder::Desc) => {
+                            list.sort_by(|a, b| self.compare_results(b, a));
+                        }
+                        Some(GremlinOrder::Asc) | None => {
+                            list.sort_by(|a, b| self.compare_results(a, b));
+                        }
+                        Some(GremlinOrder::By(prop, direction)) => {
+                            // Property-based ordering - simplified for now
+                            list.sort_by(|a, b| self.compare_results(a, b));
+                        }
+                    }
+                    ordered_results.push(GremlinResult::List(list));
+                }
+                GremlinResult::Map(mut map) => {
+                    // Convert map to sorted list of key-value pairs based on values
+                    let mut map_pairs: Vec<(String, GremlinResult)> = map.into_iter().collect();
+
+                    match order {
+                        Some(GremlinOrder::Desc) => {
+                            map_pairs.sort_by(|(_, a), (_, b)| self.compare_results(b, a));
+                        }
+                        Some(GremlinOrder::Asc) | None => {
+                            map_pairs.sort_by(|(_, a), (_, b)| self.compare_results(a, b));
+                        }
+                        Some(GremlinOrder::By(prop, direction)) => {
+                            // Sort by values if prop is "values", otherwise by keys
+                            if prop == "values" {
+                                match direction {
+                                    GremlinOrderDirection::Desc => {
+                                        map_pairs
+                                            .sort_by(|(_, a), (_, b)| self.compare_results(b, a));
+                                    }
+                                    GremlinOrderDirection::Asc => {
+                                        map_pairs
+                                            .sort_by(|(_, a), (_, b)| self.compare_results(a, b));
+                                    }
+                                }
+                            } else {
+                                // Sort by keys
+                                match direction {
+                                    GremlinOrderDirection::Desc => {
+                                        map_pairs.sort_by(|(a, _), (b, _)| b.cmp(a));
+                                    }
+                                    GremlinOrderDirection::Asc => {
+                                        map_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let sorted_map: HashMap<String, GremlinResult> =
+                        map_pairs.into_iter().collect();
+                    ordered_results.push(GremlinResult::Map(sorted_map));
+                }
+                other => {
+                    // For non-collection results, just pass through
+                    ordered_results.push(other);
+                }
+            }
+        }
+
+        Ok(ordered_results)
+    }
+
+    /// Execute .by() step - specify ordering criteria (usually used with order())
+    async fn execute_by_step(
+        &self,
+        results: Vec<GremlinResult>,
+        property: &str,
+        order: Option<&GremlinOrder>,
+        _context: &mut GremlinContext,
+        _stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // The .by() step is typically a modifier for order() and other steps
+        // For now, we'll implement basic property-based ordering
+        if let Some(ref property_store) = self.property_store {
+            let mut vertex_property_pairs = Vec::new();
+
+            // Collect vertices with their property values
+            for result in results {
+                if let Some(vertex_id) = result.as_vertex() {
+                    let properties = property_store.get_vertex_properties(vertex_id).await?;
+                    let prop_value = properties
+                        .get(property)
+                        .cloned()
+                        .unwrap_or(PropertyValue::Null);
+                    vertex_property_pairs.push((result, prop_value));
+                } else {
+                    vertex_property_pairs.push((result, PropertyValue::Null));
+                }
+            }
+
+            // Sort by property values
+            match order {
+                Some(GremlinOrder::Desc) => {
+                    vertex_property_pairs
+                        .sort_by(|(_, a), (_, b)| self.compare_property_values(b, a).cmp(&0));
+                }
+                Some(GremlinOrder::Asc) | None => {
+                    vertex_property_pairs
+                        .sort_by(|(_, a), (_, b)| self.compare_property_values(a, b).cmp(&0));
+                }
+                Some(GremlinOrder::By(_, direction)) => match direction {
+                    GremlinOrderDirection::Desc => {
+                        vertex_property_pairs
+                            .sort_by(|(_, a), (_, b)| self.compare_property_values(b, a).cmp(&0));
+                    }
+                    GremlinOrderDirection::Asc => {
+                        vertex_property_pairs
+                            .sort_by(|(_, a), (_, b)| self.compare_property_values(a, b).cmp(&0));
+                    }
+                },
+            }
+
+            let sorted_results = vertex_property_pairs
+                .into_iter()
+                .map(|(result, _)| result)
+                .collect();
+
+            Ok(sorted_results)
+        } else {
+            // No property store available, return results unsorted
+            Ok(results)
+        }
+    }
+
+    /// Execute .neq() step - filter out results that match the traversal
+    async fn execute_neq_step(
+        &self,
+        results: Vec<GremlinResult>,
+        traversal: &GremlinTraversal,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Execute the traversal to get values to exclude
+        let (exclude_results, _) = self.execute(traversal, context).await?;
+        let exclude_vertices: HashSet<VertexId> = exclude_results
+            .into_iter()
+            .filter_map(|r| r.as_vertex())
+            .collect();
+
+        // Filter out results that match the excluded vertices
+        let filtered_results = results
+            .into_iter()
+            .filter(|result| {
+                match result.as_vertex() {
+                    Some(vertex_id) => !exclude_vertices.contains(&vertex_id),
+                    None => true, // Keep non-vertex results
+                }
+            })
+            .collect();
+
+        Ok(filtered_results)
+    }
+
+    /// Execute .where() filter step - apply predicate filtering
+    async fn execute_where_filter_step(
+        &self,
+        results: Vec<GremlinResult>,
+        predicate: &GremlinPredicate,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // This is the same as the regular where step
+        self.execute_where_step(results, predicate, context, stats)
+            .await
     }
 }
 

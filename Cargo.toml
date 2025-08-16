@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
 description = "A high-performance graph database with Poly-LSM storage engine"
 license = "MIT"
-repository = "https://github.com/yourusername/aster-db"
+repository = "https://github.com/dihmeetree/aster-db"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -37,7 +37,3 @@ proptest = "1.0"
 [lib]
 name = "aster_db"
 path = "src/lib.rs"
-
-[[example]]
-name = "recommendation_engine"
-path = "examples/recommendation_engine.rs"

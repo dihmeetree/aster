@@ -48,10 +48,15 @@ impl CostModel {
         Self { config, stats }
     }
 
+    /// Get the configuration used by this cost model
+    pub fn get_config(&self) -> &PolyLSMConfig {
+        &self.config
+    }
+
     /// Calculate the cost of a delta update for a vertex with given degree
     /// Based on Equation 3 from the paper:
     /// C_D = (2I·T·L)/B + (θ_L·d)/(θ_U·(T-1))
-    fn delta_update_cost(&self, vertex_degree: u64) -> f64 {
+    pub fn delta_update_cost(&self, vertex_degree: u64) -> f64 {
         let i = self.config.degree_sketch_bits_per_vertex as f64 / 8.0; // I = 8 bits = 1 byte per vertex ID
         let t = self.config.level_size_ratio as f64; // T = 10
         let l = self.config.max_levels as f64; // L = number of levels from config
@@ -76,7 +81,7 @@ impl CostModel {
     /// Calculate the cost of a pivot update for a vertex with given degree
     /// Based on Equation 4 from the paper:
     /// C_P = 2 + ((d(u)+1)·I)/B + ((d(u)+2)·I·T·L)/B
-    fn pivot_update_cost(&self, vertex_degree: u64) -> f64 {
+    pub fn pivot_update_cost(&self, vertex_degree: u64) -> f64 {
         let i = self.config.degree_sketch_bits_per_vertex as f64 / 8.0; // I = 8 bits = 1 byte per vertex ID
         let t = self.config.level_size_ratio as f64; // T = 10
         let l = self.config.max_levels as f64; // L = number of levels from config
@@ -95,7 +100,7 @@ impl CostModel {
     /// Calculate the optimal workload split ratio
     /// Based on Equation 7 from the paper:
     /// θ_L / θ_U = (T-1) · [(d_avg + 2) · I · T · L + 2 · B] / (d_avg · B)
-    fn calculate_optimal_workload_ratio(&self) -> f64 {
+    pub fn calculate_optimal_workload_ratio(&self) -> f64 {
         let i = self.config.degree_sketch_bits_per_vertex as f64 / 8.0; // I = 8 bits = 1 byte per vertex ID
         let t = self.config.level_size_ratio as f64; // T = 10
         let l = self.config.max_levels as f64; // L = number of levels from config
@@ -116,7 +121,7 @@ impl CostModel {
     /// Calculate the degree threshold where delta becomes better than pivot
     /// Based on Equation 8 from the paper:
     /// d_threshold = (θ_L · d_avg · B) / (θ_U · I · (T-1) · (T·L+1)) - (2·B) / (I·(T·L+1)) - 1 / (T·L+1)
-    fn calculate_degree_threshold(&self) -> u64 {
+    pub fn calculate_degree_threshold(&self) -> u64 {
         let i = self.config.degree_sketch_bits_per_vertex as f64 / 8.0; // I = 8 bits = 1 byte per vertex ID
         let t = self.config.level_size_ratio as f64; // T = 10
         let l = self.config.max_levels as f64; // L = number of levels from config

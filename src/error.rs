@@ -1,7 +1,5 @@
 //! Error types for Aster database operations
 
-use std::fmt;
-
 /// Result type alias for Aster operations
 pub type Result<T> = std::result::Result<T, AsterError>;
 

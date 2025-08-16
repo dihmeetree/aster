@@ -20,6 +20,7 @@ pub mod storage;
 pub mod transaction;
 pub mod types;
 pub mod utils;
+pub mod validation;
 
 pub use error::{AsterError, Result};
 pub use graph::{Edge, Graph, Vertex};
@@ -35,6 +36,7 @@ pub use transaction::{
     TransactionManager, TransactionStats,
 };
 pub use types::{EdgeId, PolyLSMConfig, Properties, PropertyValue, Timestamp, VertexId};
+pub use validation::{CostModelValidator, ValidationParameters, ValidationResult};
 
 use std::sync::Arc;
 
