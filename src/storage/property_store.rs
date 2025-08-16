@@ -567,6 +567,19 @@ impl PropertyStore {
 
         Ok(current_properties)
     }
+
+    /// Get all vertex IDs that have properties (for Gremlin V() traversals)
+    pub async fn get_all_vertex_ids(&self) -> Result<Vec<VertexId>> {
+        let vertex_props = self.vertex_properties.read();
+        let mut vertex_ids = std::collections::HashSet::new();
+
+        // Collect all unique vertex IDs from the MemTable
+        for (vertex_id, _) in vertex_props.iter() {
+            vertex_ids.insert(vertex_id);
+        }
+
+        Ok(vertex_ids.into_iter().collect())
+    }
 }
 
 /// Statistics about the property store

@@ -116,15 +116,25 @@ impl PolyLSM {
     ) -> Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
 
+        // Validate paper compliance if using default configuration
+        if let Err(e) = config.validate_paper_compliance() {
+            tracing::warn!("Configuration deviates from paper specifications: {}", e);
+            tracing::info!("Current config: {}", config.paper_parameter_summary());
+        } else {
+            tracing::info!(
+                "Using paper-compliant configuration: {}",
+                config.paper_parameter_summary()
+            );
+        }
+
         // Create directory if it doesn't exist
         fs::create_dir_all(&data_dir)?;
 
-        // Initialize levels
+        // Initialize levels according to paper specification (L=4)
         let mut levels = Vec::new();
         let mut current_max_size = 64 * 1024 * 1024; // Start with 64MB for L1
 
-        for i in 0..7 {
-            // Support up to L6
+        for i in 0..config.max_levels {
             levels.push(Level::new(i, current_max_size));
             current_max_size *= config.level_size_ratio as u64;
         }
@@ -202,10 +212,10 @@ impl PolyLSM {
 
     /// Add a new edge using adaptive update strategy
     pub async fn add_edge(&self, source: VertexId, target: VertexId) -> Result<()> {
-        // Get current degree estimate
+        // Get current degree estimate using vertex ID
         let degree = {
             let sketch = self.degree_sketch.read();
-            sketch.get_degree(source.as_u64() as usize).unwrap_or(0)
+            sketch.get_degree_by_id(source.as_u64())
         };
 
         // Select update method
@@ -228,14 +238,10 @@ impl PolyLSM {
 
         self.insert_entry(source, entry).await?;
 
-        // Update degree sketch
+        // Update degree sketch using vertex ID-based method
         {
             let mut sketch = self.degree_sketch.write();
-            if source.as_u64() as usize >= sketch.capacity() {
-                let new_capacity = (source.as_u64() as usize + 1).saturating_mul(2).max(1024);
-                sketch.resize(new_capacity);
-            }
-            sketch.increment_degree(source.as_u64() as usize);
+            sketch.increment_degree_by_id(source.as_u64());
         }
 
         Ok(())
@@ -258,14 +264,10 @@ impl PolyLSM {
 
         self.insert_entry(source, entry).await?;
 
-        // Update degree sketch
+        // Update degree sketch using vertex ID-based method
         {
             let mut sketch = self.degree_sketch.write();
-            if source.as_u64() as usize >= sketch.capacity() {
-                let new_capacity = (source.as_u64() as usize + 1).saturating_mul(2).max(1024);
-                sketch.resize(new_capacity);
-            }
-            sketch.increment_degree(source.as_u64() as usize);
+            sketch.increment_degree_by_id(source.as_u64());
         }
 
         Ok(())
@@ -484,6 +486,12 @@ impl PolyLSM {
 
     /// Get all neighbors of a vertex
     pub async fn get_neighbors(&self, vertex_id: VertexId) -> Result<Vec<VertexId>> {
+        // Track this lookup operation for adaptive strategy
+        {
+            let mut strategy = self.adaptive_strategy.lock();
+            strategy.record_lookup();
+        }
+
         let mut all_entries = Vec::new();
 
         // Check active MemTable
@@ -612,6 +620,45 @@ impl PolyLSM {
         }
     }
 
+    /// Update adaptive strategy with current degree distribution
+    pub fn update_adaptive_strategy(&self) -> Result<()> {
+        // Sample degree distribution from degree sketch
+        let sample_size = 1000;
+        let mut degrees = Vec::with_capacity(sample_size);
+
+        {
+            let sketch = self.degree_sketch.read();
+            let capacity = std::cmp::min(sample_size, sketch.capacity());
+
+            for i in 0..capacity {
+                if let Some(degree) = sketch.get_degree(i) {
+                    degrees.push(degree);
+                }
+            }
+        }
+
+        // Update adaptive strategy with degree distribution
+        if !degrees.is_empty() {
+            let mut strategy = self.adaptive_strategy.lock();
+            strategy.update_degree_distribution(&degrees);
+        }
+
+        Ok(())
+    }
+
+    /// Get comprehensive adaptive strategy analytics
+    pub fn get_adaptive_analytics(
+        &self,
+    ) -> (
+        super::adaptive_updates::WorkloadAnalysis,
+        super::adaptive_updates::EffectivenessMetrics,
+    ) {
+        let strategy = self.adaptive_strategy.lock();
+        let workload = strategy.get_workload_analysis();
+        let effectiveness = strategy.get_effectiveness_metrics();
+        (workload, effectiveness)
+    }
+
     /// Range query to get all vertices and their entries within a vertex ID range
     pub async fn range(
         &self,
@@ -672,6 +719,136 @@ impl PolyLSM {
 
         Ok(deduped_results)
     }
+
+    /// Get all versions of a vertex for MVCC snapshot isolation
+    /// Returns all MemTableEntry versions sorted by timestamp (newest first)
+    pub async fn get_vertex_versions(&self, vertex_id: VertexId) -> Result<Vec<MemTableEntry>> {
+        let mut all_versions = Vec::new();
+
+        // Check active MemTable
+        {
+            let memtable = self.active_memtable.read();
+            if let Some(entries) = memtable.get(vertex_id) {
+                all_versions.extend(entries);
+            }
+        }
+
+        // Check immutable MemTables
+        {
+            let immutable = self.immutable_memtables.read();
+            for memtable in immutable.iter() {
+                if let Some(entries) = memtable.get(vertex_id) {
+                    for entry in entries {
+                        all_versions.push(entry.clone());
+                    }
+                }
+            }
+        }
+
+        // Check all SSTables across all levels
+        {
+            let levels = self.levels.read();
+            for level in levels.iter() {
+                for sstable in level.sstables.iter() {
+                    if let Ok(Some(entry)) = sstable.get(vertex_id).await {
+                        all_versions.push(entry);
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp (newest first) for MVCC version ordering
+        all_versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        Ok(all_versions)
+    }
+
+    /// Write vertex data within a transaction context for MVCC
+    pub async fn transactional_write_vertex(
+        &self,
+        vertex_id: VertexId,
+        data: Vec<u8>,
+        _transaction_id: crate::transaction::TransactionId,
+        write_timestamp: Timestamp,
+    ) -> Result<()> {
+        // Create a versioned entry with transaction information
+        let entry = MemTableEntry::new_pivot(data, write_timestamp);
+
+        // Write to active MemTable
+        {
+            let memtable = self.active_memtable.read();
+            memtable.insert(vertex_id, entry)?;
+        }
+
+        // Check if MemTable needs flushing
+        let should_flush = {
+            let memtable = self.active_memtable.read();
+            memtable.is_full()
+        };
+
+        if should_flush {
+            self.maybe_flush_memtables().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Read vertex data with snapshot isolation
+    pub async fn snapshot_read(
+        &self,
+        vertex_id: VertexId,
+        snapshot_timestamp: u64,
+        _transaction_id: crate::transaction::TransactionId,
+    ) -> Result<Option<Vec<u8>>> {
+        // Get all versions of this vertex
+        let versions = self.get_vertex_versions(vertex_id).await?;
+
+        // Find the latest version visible to this snapshot
+        for entry in versions {
+            // For now, assume all data committed before snapshot_timestamp is visible
+            // In a full implementation, we'd check the commit log more thoroughly
+            if entry.timestamp.as_u64() <= snapshot_timestamp {
+                if !entry.is_tombstone() {
+                    return Ok(Some(entry.data));
+                } else {
+                    // This vertex was deleted
+                    return Ok(None);
+                }
+            }
+        }
+
+        // No visible version found
+        Ok(None)
+    }
+
+    /// Mark a vertex as deleted within a transaction
+    pub async fn transactional_delete_vertex(
+        &self,
+        vertex_id: VertexId,
+        _transaction_id: crate::transaction::TransactionId,
+        delete_timestamp: Timestamp,
+    ) -> Result<()> {
+        // Create a tombstone entry
+        let tombstone = MemTableEntry::new_tombstone(delete_timestamp);
+
+        // Write tombstone to active MemTable
+        {
+            let memtable = self.active_memtable.read();
+            memtable.insert(vertex_id, tombstone)?;
+        }
+
+        // Check if MemTable needs flushing
+        let should_flush = {
+            let memtable = self.active_memtable.read();
+            memtable.is_full()
+        };
+
+        if should_flush {
+            self.maybe_flush_memtables().await?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Statistics for a single level
@@ -697,6 +874,52 @@ pub struct PolyLSMStats {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_paper_specification_enforcement() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = PolyLSMConfig::paper_specification();
+
+        // Verify configuration compliance
+        assert!(config.validate_paper_compliance().is_ok());
+
+        let storage = PolyLSM::open_with_config(temp_dir.path(), config.clone())
+            .await
+            .unwrap();
+
+        // Verify exactly L=4 levels are initialized
+        let levels = storage.levels.read();
+        assert_eq!(
+            levels.len(),
+            4,
+            "Should have exactly 4 levels as specified in paper"
+        );
+
+        // Verify level size ratios follow T=10
+        let base_size = 64 * 1024 * 1024; // 64MB
+        for (i, level) in levels.iter().enumerate() {
+            let expected_size = base_size * (10_u64.pow(i as u32));
+            assert_eq!(
+                level.max_size, expected_size,
+                "Level {} should have size {}",
+                i, expected_size
+            );
+            assert_eq!(
+                level.number, i as u32,
+                "Level {} should have correct level number",
+                i
+            );
+        }
+
+        println!("Paper specification enforcement verified:");
+        println!("  - {} levels initialized", levels.len());
+        println!("  - Level size ratio: T={}", config.level_size_ratio);
+        println!("  - Block size: B={}KB", config.block_size / 1024);
+        println!(
+            "  - Degree sketch: I={} bits",
+            config.degree_sketch_bits_per_vertex
+        );
+    }
 
     #[tokio::test]
     async fn test_poly_lsm_basic_operations() {

@@ -24,6 +24,10 @@ pub mod utils;
 pub use error::{AsterError, Result};
 pub use graph::{Edge, Graph, Vertex};
 pub use metrics::{DatabaseMetrics, MetricsCollector, MetricsConfig};
+pub use query::{
+    GremlinContext, GremlinEngine, GremlinResultSet, GremlinTraversal, QueryContext, QueryPlan,
+    RangeQueryResult, RangeScanOptimizer,
+};
 pub use recovery::{RecoveryConfig, RecoveryManager, RecoveryStats};
 pub use storage::{PolyLSM, PropertyStore, PropertyStoreConfig};
 pub use transaction::{
@@ -42,6 +46,8 @@ pub struct AsterDBConfig {
     pub transaction_config: TransactionConfig,
     pub enable_metrics: bool,
     pub metrics_config: MetricsConfig,
+    pub enable_properties: bool,
+    pub property_store_config: PropertyStoreConfig,
 }
 
 impl Default for AsterDBConfig {
@@ -52,6 +58,8 @@ impl Default for AsterDBConfig {
             transaction_config: TransactionConfig::default(),
             enable_metrics: true,
             metrics_config: MetricsConfig::default(),
+            enable_properties: true,
+            property_store_config: PropertyStoreConfig::default(),
         }
     }
 }
@@ -59,9 +67,12 @@ impl Default for AsterDBConfig {
 /// Core graph database instance
 pub struct AsterDB {
     storage: Arc<PolyLSM>,
+    property_store: Option<Arc<PropertyStore>>,
     transaction_manager: Arc<TransactionManager>,
     recovery_manager: Option<Arc<RecoveryManager>>,
     metrics_collector: Option<Arc<MetricsCollector>>,
+    gremlin_engine: GremlinEngine,
+    range_scan_optimizer: RangeScanOptimizer,
     config: AsterDBConfig,
 }
 
@@ -76,10 +87,21 @@ impl AsterDB {
         path: P,
         config: AsterDBConfig,
     ) -> Result<Self> {
-        let storage = Arc::new(PolyLSM::open(path).await?);
+        let path_ref = path.as_ref();
+        let storage = Arc::new(PolyLSM::open(path_ref).await?);
         let transaction_manager = Arc::new(TransactionManager::new_with_config(
             config.transaction_config.clone(),
         ));
+
+        // Initialize property store if enabled (as separate column family)
+        let property_store = if config.enable_properties {
+            let property_path = path_ref.join("properties");
+            let prop_store =
+                PropertyStore::new(property_path, config.property_store_config.clone())?;
+            Some(Arc::new(prop_store))
+        } else {
+            None
+        };
 
         // Initialize recovery manager if enabled
         let recovery_manager = if config.enable_recovery {
@@ -109,11 +131,21 @@ impl AsterDB {
             None
         };
 
+        // Initialize Gremlin engine
+        let graph = Arc::new(Graph::new(&storage));
+        let gremlin_engine = GremlinEngine::new(graph, property_store.clone());
+
+        // Initialize range scan optimizer
+        let range_scan_optimizer = RangeScanOptimizer::new(property_store.clone());
+
         Ok(Self {
             storage,
+            property_store,
             transaction_manager,
             recovery_manager,
             metrics_collector,
+            gremlin_engine,
+            range_scan_optimizer,
             config,
         })
     }
@@ -207,6 +239,11 @@ impl AsterDB {
             let poly_lsm_stats = self.storage.stats().await;
             let tx_stats = self.transaction_manager.get_stats();
             let recovery_stats = self.recovery_manager.as_ref().map(|rm| rm.get_stats());
+            let property_stats = if let Some(ref ps) = self.property_store {
+                Some(ps.get_stats().await)
+            } else {
+                None
+            };
 
             // Update the metrics collector with latest stats
             mc.update_from_components(
@@ -216,6 +253,11 @@ impl AsterDB {
                 Some(tx_stats),
                 recovery_stats,
             );
+
+            // Update property store stats if available
+            if let Some(prop_stats) = property_stats {
+                mc.update_property_stats(prop_stats);
+            }
 
             Some(mc.get_current_metrics())
         } else {
@@ -319,6 +361,11 @@ impl AsterDB {
         &self.storage
     }
 
+    /// Get the property store reference if enabled
+    pub fn property_store(&self) -> Option<&PropertyStore> {
+        self.property_store.as_ref().map(|ps| ps.as_ref())
+    }
+
     /// Get the transaction manager reference  
     pub fn transaction_manager(&self) -> &TransactionManager {
         &self.transaction_manager
@@ -327,6 +374,219 @@ impl AsterDB {
     /// Check if recovery is enabled
     pub fn recovery_enabled(&self) -> bool {
         self.recovery_manager.is_some()
+    }
+
+    /// Check if properties are enabled
+    pub fn properties_enabled(&self) -> bool {
+        self.property_store.is_some()
+    }
+
+    /// Set properties for a vertex (requires properties to be enabled)
+    pub async fn set_vertex_properties(
+        &self,
+        vertex_id: VertexId,
+        properties: Properties,
+    ) -> Result<()> {
+        if let Some(ref property_store) = self.property_store {
+            property_store
+                .set_vertex_properties(vertex_id, properties)
+                .await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Get properties for a vertex (requires properties to be enabled)
+    pub async fn get_vertex_properties(&self, vertex_id: VertexId) -> Result<Properties> {
+        if let Some(ref property_store) = self.property_store {
+            property_store.get_vertex_properties(vertex_id).await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Set properties for an edge (requires properties to be enabled)
+    pub async fn set_edge_properties(&self, edge_id: EdgeId, properties: Properties) -> Result<()> {
+        if let Some(ref property_store) = self.property_store {
+            property_store
+                .set_edge_properties(edge_id, properties)
+                .await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Get properties for an edge (requires properties to be enabled)
+    pub async fn get_edge_properties(&self, edge_id: EdgeId) -> Result<Properties> {
+        if let Some(ref property_store) = self.property_store {
+            property_store.get_edge_properties(edge_id).await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Find vertices by property value (requires properties to be enabled)
+    pub async fn find_vertices_by_property(
+        &self,
+        key: &str,
+        value: &PropertyValue,
+    ) -> Result<Vec<VertexId>> {
+        if let Some(ref property_store) = self.property_store {
+            property_store.find_vertices_by_property(key, value).await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Find vertices by property value range (requires properties to be enabled)
+    pub async fn find_vertices_by_property_range(
+        &self,
+        key: &str,
+        min: &PropertyValue,
+        max: &PropertyValue,
+    ) -> Result<Vec<VertexId>> {
+        if let Some(ref property_store) = self.property_store {
+            property_store
+                .find_vertices_by_property_range(key, min, max)
+                .await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Delete specific properties from a vertex (requires properties to be enabled)
+    pub async fn delete_vertex_properties(
+        &self,
+        vertex_id: VertexId,
+        keys: Vec<String>,
+    ) -> Result<()> {
+        if let Some(ref property_store) = self.property_store {
+            property_store
+                .delete_vertex_properties(vertex_id, keys)
+                .await
+        } else {
+            Err(AsterError::configuration("Properties not enabled"))
+        }
+    }
+
+    /// Execute a Gremlin traversal query
+    pub async fn gremlin(&self, traversal: &GremlinTraversal) -> Result<GremlinResultSet> {
+        let query_context = QueryContext::default();
+        let mut gremlin_context = GremlinContext::new(query_context);
+
+        let (results, stats) = self
+            .gremlin_engine
+            .execute(traversal, &mut gremlin_context)
+            .await?;
+        Ok(GremlinResultSet::new(results, stats))
+    }
+
+    /// Execute a Gremlin traversal query with custom context
+    pub async fn gremlin_with_context(
+        &self,
+        traversal: &GremlinTraversal,
+        context: &mut GremlinContext,
+    ) -> Result<GremlinResultSet> {
+        let (results, stats) = self.gremlin_engine.execute(traversal, context).await?;
+        Ok(GremlinResultSet::new(results, stats))
+    }
+
+    /// Parse and execute a Gremlin query string
+    pub async fn gremlin_query(&self, query: &str) -> Result<GremlinResultSet> {
+        let traversal = GremlinEngine::parse_query(query)?;
+        self.gremlin(&traversal).await
+    }
+
+    /// Create a Gremlin traversal starting with all vertices: g.V()
+    pub fn g_v(&self) -> GremlinTraversal {
+        GremlinTraversal::v(None)
+    }
+
+    /// Create a Gremlin traversal starting with specific vertices: g.V(id1, id2, ...)
+    pub fn g_v_ids(&self, ids: Vec<VertexId>) -> GremlinTraversal {
+        GremlinTraversal::v(Some(ids))
+    }
+
+    /// Create a Gremlin traversal starting with all edges: g.E()
+    pub fn g_e(&self) -> GremlinTraversal {
+        GremlinTraversal::e(None)
+    }
+
+    /// Create a Gremlin traversal starting with specific edges: g.E(id1, id2, ...)
+    pub fn g_e_ids(&self, ids: Vec<EdgeId>) -> GremlinTraversal {
+        GremlinTraversal::e(Some(ids))
+    }
+
+    /// Get the Gremlin engine reference for advanced usage
+    pub fn gremlin_engine(&self) -> &GremlinEngine {
+        &self.gremlin_engine
+    }
+
+    /// Execute an optimized range query with predicates
+    pub async fn optimized_range_query(
+        &self,
+        start_vertex: VertexId,
+        end_vertex: VertexId,
+        predicates: Vec<query::QueryPredicate>,
+    ) -> Result<(RangeQueryResult, query::QueryStats)> {
+        let context = QueryContext::default();
+        let mut optimizer = self.range_scan_optimizer.clone();
+
+        // Optimize the query
+        let plan = optimizer
+            .optimize_range_query(start_vertex, end_vertex, predicates, &context)
+            .await?;
+
+        // Execute the optimized plan
+        optimizer
+            .execute_optimized_range_query(&plan, &context, &self.storage)
+            .await
+    }
+
+    /// Create a query plan for a range query without executing it
+    pub async fn plan_range_query(
+        &self,
+        start_vertex: VertexId,
+        end_vertex: VertexId,
+        predicates: Vec<query::QueryPredicate>,
+    ) -> Result<QueryPlan> {
+        let context = QueryContext::default();
+        let mut optimizer = self.range_scan_optimizer.clone();
+
+        optimizer
+            .optimize_range_query(start_vertex, end_vertex, predicates, &context)
+            .await
+    }
+
+    /// Execute a pre-created query plan
+    pub async fn execute_query_plan(
+        &self,
+        plan: &QueryPlan,
+    ) -> Result<(RangeQueryResult, query::QueryStats)> {
+        let context = QueryContext::default();
+        let optimizer = self.range_scan_optimizer.clone();
+
+        optimizer
+            .execute_optimized_range_query(plan, &context, &self.storage)
+            .await
+    }
+
+    /// Get vertices in a range with basic filtering (unoptimized)
+    pub async fn range_query(
+        &self,
+        start_vertex: VertexId,
+        end_vertex: VertexId,
+    ) -> Result<Vec<VertexId>> {
+        let range_entries = self.storage.range(start_vertex, end_vertex).await?;
+        Ok(range_entries
+            .into_iter()
+            .map(|(vertex_id, _)| vertex_id)
+            .collect())
+    }
+
+    /// Get the range scan optimizer reference for advanced usage
+    pub fn range_scan_optimizer(&self) -> &RangeScanOptimizer {
+        &self.range_scan_optimizer
     }
 }
 

@@ -738,6 +738,12 @@ impl MetricsCollector {
         }
     }
 
+    /// Update property store statistics
+    pub fn update_property_stats(&self, property_stats: PropertyStoreStats) {
+        let mut metrics = self.current_metrics.write();
+        metrics.storage.property_stats = property_stats;
+    }
+
     /// Check for alert conditions
     async fn check_alerts(
         metrics: &Arc<RwLock<DatabaseMetrics>>,

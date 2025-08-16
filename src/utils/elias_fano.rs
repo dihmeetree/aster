@@ -17,14 +17,52 @@ pub struct EliasFanoConfig {
     pub segment_count: usize,
     /// Prefix length for high bits (automatically calculated if 0)
     pub prefix_length: usize,
+    /// Maximum segment size (paper-specified optimization)
+    pub max_segment_size: usize,
+    /// Minimum segment size for efficient encoding
+    pub min_segment_size: usize,
+    /// Use paper-specified optimal bit allocation
+    pub use_optimal_allocation: bool,
+}
+
+impl EliasFanoConfig {
+    /// Create configuration with paper-specified parameters
+    pub fn paper_specification() -> Self {
+        Self {
+            segment_count: 16,            // t = 16 segments (paper default)
+            prefix_length: 0,             // Auto-calculate based on data
+            max_segment_size: 4096,       // Align with block size (B = 4KB)
+            min_segment_size: 64,         // Minimum for efficient encoding
+            use_optimal_allocation: true, // Use paper's optimal bit allocation
+        }
+    }
+
+    /// Create configuration optimized for small neighbor lists
+    pub fn small_lists() -> Self {
+        Self {
+            segment_count: 4,
+            prefix_length: 0,
+            max_segment_size: 1024,
+            min_segment_size: 16,
+            use_optimal_allocation: true,
+        }
+    }
+
+    /// Create configuration optimized for large neighbor lists
+    pub fn large_lists() -> Self {
+        Self {
+            segment_count: 32,
+            prefix_length: 0,
+            max_segment_size: 8192,
+            min_segment_size: 128,
+            use_optimal_allocation: true,
+        }
+    }
 }
 
 impl Default for EliasFanoConfig {
     fn default() -> Self {
-        Self {
-            segment_count: 16, // Good balance between compression and access speed
-            prefix_length: 0,  // Auto-calculate
-        }
+        Self::paper_specification()
     }
 }
 
@@ -39,6 +77,27 @@ pub struct PartitionedEliasFano {
     segments: Vec<EliasFanoSegment>,
     /// Total number of vertices in the list
     total_count: usize,
+    /// Compression statistics
+    compression_stats: CompressionStats,
+}
+
+/// Statistics about the compression performance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressionStats {
+    /// Original size in bytes (uncompressed)
+    pub original_size: usize,
+    /// Compressed size in bytes
+    pub compressed_size: usize,
+    /// Compression ratio (original/compressed)
+    pub compression_ratio: f64,
+    /// Average bits per vertex ID
+    pub bits_per_vertex: f64,
+    /// Number of segments created
+    pub num_segments: usize,
+    /// Average segment size
+    pub avg_segment_size: f64,
+    /// Space overhead from segmentation
+    pub segmentation_overhead: usize,
 }
 
 /// Single Elias-Fano encoded segment
@@ -56,6 +115,17 @@ struct EliasFanoSegment {
     base_value: u64,
 }
 
+/// Information about segment boundaries for optimal partitioning
+#[derive(Debug, Clone)]
+struct SegmentInfo {
+    /// Starting index in the vertex array
+    start_index: usize,
+    /// Ending index in the vertex array
+    end_index: usize,
+    /// Estimated compressed size
+    estimated_size: usize,
+}
+
 impl PartitionedEliasFano {
     /// Encode a sorted list of vertex IDs using Partitioned Elias-Fano
     pub fn encode(vertices: &[VertexId], config: EliasFanoConfig) -> Result<Self> {
@@ -65,6 +135,15 @@ impl PartitionedEliasFano {
                 segment_starts: Vec::new(),
                 segments: Vec::new(),
                 total_count: 0,
+                compression_stats: CompressionStats {
+                    original_size: 0,
+                    compressed_size: 0,
+                    compression_ratio: 1.0,
+                    bits_per_vertex: 0.0,
+                    num_segments: 0,
+                    avg_segment_size: 0.0,
+                    segmentation_overhead: 0,
+                },
             });
         }
 
@@ -74,32 +153,191 @@ impl PartitionedEliasFano {
         vertex_ids.dedup();
 
         let total_count = vertex_ids.len();
-        let segment_size = (total_count + config.segment_count - 1) / config.segment_count;
+
+        // Use paper-specified adaptive segmentation
+        let segments_info = Self::calculate_optimal_segments(&vertex_ids, &config);
 
         let mut segment_starts = Vec::new();
         let mut segments = Vec::new();
 
-        // Partition vertices into segments
-        for chunk in vertex_ids.chunks(segment_size) {
+        // Create segments based on optimal partitioning
+        for segment_info in segments_info {
+            let chunk = &vertex_ids[segment_info.start_index..segment_info.end_index];
             if chunk.is_empty() {
                 continue;
             }
 
             segment_starts.push(chunk[0]);
-            let segment = Self::encode_segment(chunk)?;
+            let segment = Self::encode_segment(chunk, &config)?;
             segments.push(segment);
         }
+
+        // Calculate compression statistics
+        let compression_stats =
+            Self::calculate_compression_stats(&vertex_ids, &segments, &segment_starts, &config);
 
         Ok(Self {
             config,
             segment_starts,
             segments,
             total_count,
+            compression_stats,
         })
     }
 
+    /// Calculate optimal segment boundaries based on paper specifications
+    fn calculate_optimal_segments(
+        vertex_ids: &[u64],
+        config: &EliasFanoConfig,
+    ) -> Vec<SegmentInfo> {
+        let total_count = vertex_ids.len();
+        let mut segments = Vec::new();
+
+        if total_count <= config.min_segment_size {
+            // Single segment for small lists
+            segments.push(SegmentInfo {
+                start_index: 0,
+                end_index: total_count,
+                estimated_size: total_count,
+            });
+            return segments;
+        }
+
+        // Calculate base segment size
+        let mut base_segment_size = (total_count + config.segment_count - 1) / config.segment_count;
+        base_segment_size =
+            base_segment_size.clamp(config.min_segment_size, config.max_segment_size);
+
+        let mut current_index = 0;
+        while current_index < total_count {
+            let end_index = std::cmp::min(current_index + base_segment_size, total_count);
+
+            // Adjust segment boundary to avoid splitting dense clusters
+            let adjusted_end = if end_index < total_count {
+                Self::find_optimal_boundary(vertex_ids, current_index, end_index)
+            } else {
+                end_index
+            };
+
+            segments.push(SegmentInfo {
+                start_index: current_index,
+                end_index: adjusted_end,
+                estimated_size: adjusted_end - current_index,
+            });
+
+            current_index = adjusted_end;
+        }
+
+        segments
+    }
+
+    /// Find optimal segment boundary to minimize compression overhead
+    fn find_optimal_boundary(vertex_ids: &[u64], start: usize, suggested_end: usize) -> usize {
+        if suggested_end >= vertex_ids.len() {
+            return vertex_ids.len();
+        }
+
+        // Look for gaps in the vertex ID sequence
+        let search_window = std::cmp::min(32, vertex_ids.len() - suggested_end);
+        let mut best_boundary = suggested_end;
+        let mut max_gap = 0;
+
+        for i in 0..search_window {
+            let idx = suggested_end + i;
+            if idx >= vertex_ids.len() - 1 {
+                break;
+            }
+
+            let gap = vertex_ids[idx + 1] - vertex_ids[idx];
+            if gap > max_gap {
+                max_gap = gap;
+                best_boundary = idx + 1;
+            }
+        }
+
+        best_boundary
+    }
+
+    /// Calculate comprehensive compression statistics
+    fn calculate_compression_stats(
+        vertex_ids: &[u64],
+        segments: &[EliasFanoSegment],
+        segment_starts: &[u64],
+        config: &EliasFanoConfig,
+    ) -> CompressionStats {
+        // Original size: 8 bytes per vertex ID
+        let original_size = vertex_ids.len() * 8;
+
+        // Compressed size: sum of all segment sizes plus metadata
+        let mut compressed_size = 0;
+        for segment in segments {
+            compressed_size += segment.high_bits.len();
+            compressed_size += segment.low_bits.len();
+            compressed_size += 1; // low_bits_per_value
+            compressed_size += 8; // base_value
+            compressed_size += 8; // count (stored as usize, approximately 8 bytes)
+        }
+
+        // Add segment starts overhead
+        let segmentation_overhead = segment_starts.len() * 8; // 8 bytes per u64
+        compressed_size += segmentation_overhead;
+
+        // Add configuration overhead
+        compressed_size += std::mem::size_of::<EliasFanoConfig>();
+
+        let compression_ratio = if compressed_size > 0 {
+            original_size as f64 / compressed_size as f64
+        } else {
+            1.0
+        };
+
+        let bits_per_vertex = if vertex_ids.len() > 0 {
+            (compressed_size * 8) as f64 / vertex_ids.len() as f64
+        } else {
+            0.0
+        };
+
+        let avg_segment_size = if segments.len() > 0 {
+            vertex_ids.len() as f64 / segments.len() as f64
+        } else {
+            0.0
+        };
+
+        CompressionStats {
+            original_size,
+            compressed_size,
+            compression_ratio,
+            bits_per_vertex,
+            num_segments: segments.len(),
+            avg_segment_size,
+            segmentation_overhead,
+        }
+    }
+
+    /// Get compression statistics
+    pub fn compression_stats(&self) -> &CompressionStats {
+        &self.compression_stats
+    }
+
+    /// Get the theoretical compression ratio from the paper
+    /// Formula: 2 + log₂(N_j/t) bits per element
+    pub fn theoretical_compression(&self) -> f64 {
+        if self.total_count == 0 {
+            return 0.0;
+        }
+
+        let n_j = self.total_count as f64;
+        let t = self.config.segment_count as f64;
+
+        // Paper formula: 2 + log₂(N_j/t) bits per element
+        let bits_per_element = 2.0 + (n_j / t).log2();
+
+        // Original is 64 bits per element (8 bytes * 8 bits)
+        64.0 / bits_per_element
+    }
+
     /// Encode a single segment using Elias-Fano
-    fn encode_segment(vertices: &[u64]) -> Result<EliasFanoSegment> {
+    fn encode_segment(vertices: &[u64], config: &EliasFanoConfig) -> Result<EliasFanoSegment> {
         if vertices.is_empty() {
             return Ok(EliasFanoSegment {
                 high_bits: Vec::new(),
@@ -118,13 +356,27 @@ impl PartitionedEliasFano {
         let deltas: Vec<u64> = vertices.iter().map(|&v| v - base_value).collect();
         let max_delta = max_value - base_value;
 
-        // Calculate optimal bit split
+        // Calculate optimal bit split using paper-specified algorithm
         let low_bits_per_value = if max_delta == 0 {
             0
+        } else if config.use_optimal_allocation {
+            // Paper-specified optimal allocation: minimize expected space
+            // Formula: k = log₂(N_j/t) where N_j is segment size and t is total segments
+            let segment_size = vertices.len() as f64;
+            let expected_k = (segment_size / config.segment_count as f64).log2();
+            let optimal_k = expected_k.round() as u8;
+
+            // Ensure k is reasonable for the actual data range
+            let max_bits = if max_delta == 0 {
+                0
+            } else {
+                (max_delta as f64).log2().ceil() as u8
+            };
+            std::cmp::min(optimal_k, std::cmp::min(max_bits, 32)) // Cap at 32 bits
         } else {
-            // Use log₂(max_delta) but ensure at least some bits for low
+            // Simple bit split for compatibility
             let total_bits = (max_delta as f64).log2().ceil() as u8;
-            std::cmp::min(total_bits / 2, 16) // Cap at 16 bits for practical reasons
+            std::cmp::min(total_bits / 2, 16)
         };
 
         let high_mask = if low_bits_per_value >= 64 {
@@ -496,6 +748,9 @@ mod tests {
         let config = EliasFanoConfig {
             segment_count: 10,
             prefix_length: 0,
+            max_segment_size: 4096,
+            min_segment_size: 64,
+            use_optimal_allocation: true,
         };
 
         let encoded = PartitionedEliasFano::encode(&vertices, config).unwrap();
@@ -544,6 +799,9 @@ mod tests {
         let config = EliasFanoConfig {
             segment_count: 4,
             prefix_length: 0,
+            max_segment_size: 4096,
+            min_segment_size: 64,
+            use_optimal_allocation: true,
         };
 
         let encoded = PartitionedEliasFano::encode(&vertices, config).unwrap();
@@ -552,5 +810,125 @@ mod tests {
         // Should achieve good compression on clustered data
         assert!(stats.compression_ratio < 0.8);
         assert_eq!(stats.total_vertices, 100);
+    }
+
+    #[test]
+    fn test_paper_specified_configuration() {
+        let vertices: Vec<VertexId> = (1..5000).step_by(7).map(VertexId::from_u64).collect();
+
+        let config = EliasFanoConfig::paper_specification();
+        let encoded = PartitionedEliasFano::encode(&vertices, config.clone()).unwrap();
+
+        // Verify paper-specified parameters
+        let stats = encoded.compression_stats();
+        assert_eq!(config.segment_count, 16);
+        assert_eq!(config.max_segment_size, 4096);
+        assert_eq!(config.min_segment_size, 64);
+        assert!(config.use_optimal_allocation);
+
+        // Test compression performance
+        assert!(stats.compression_ratio > 1.0, "Should achieve compression");
+        assert!(
+            stats.bits_per_vertex < 64.0,
+            "Should use fewer than 64 bits per vertex"
+        );
+
+        // Compare with theoretical prediction
+        let theoretical = encoded.theoretical_compression();
+        println!("Paper-specified compression:");
+        println!("  Actual ratio: {:.2}x", stats.compression_ratio);
+        println!("  Theoretical ratio: {:.2}x", theoretical);
+        println!("  Bits per vertex: {:.2}", stats.bits_per_vertex);
+        println!("  Segments: {}", stats.num_segments);
+
+        // Verify decoding works
+        let decoded = encoded.decode().unwrap();
+        assert_eq!(vertices.len(), decoded.len());
+    }
+
+    #[test]
+    fn test_optimal_bit_allocation() {
+        let vertices: Vec<VertexId> = (100..2000).step_by(5).map(VertexId::from_u64).collect();
+
+        // Test with optimal allocation enabled
+        let config_optimal = EliasFanoConfig {
+            segment_count: 16,
+            use_optimal_allocation: true,
+            max_segment_size: 4096,
+            min_segment_size: 64,
+            prefix_length: 0,
+        };
+        let encoded_optimal = PartitionedEliasFano::encode(&vertices, config_optimal).unwrap();
+
+        // Test with simple allocation
+        let config_simple = EliasFanoConfig {
+            segment_count: 16,
+            use_optimal_allocation: false,
+            max_segment_size: 4096,
+            min_segment_size: 64,
+            prefix_length: 0,
+        };
+        let encoded_simple = PartitionedEliasFano::encode(&vertices, config_simple).unwrap();
+
+        let stats_optimal = encoded_optimal.compression_stats();
+        let stats_simple = encoded_simple.compression_stats();
+
+        println!("Bit allocation comparison:");
+        println!(
+            "  Optimal: {:.2} bits/vertex",
+            stats_optimal.bits_per_vertex
+        );
+        println!("  Simple: {:.2} bits/vertex", stats_simple.bits_per_vertex);
+
+        // Both should work and decode correctly
+        let decoded_optimal = encoded_optimal.decode().unwrap();
+        let decoded_simple = encoded_simple.decode().unwrap();
+
+        assert_eq!(vertices.len(), decoded_optimal.len());
+        assert_eq!(vertices.len(), decoded_simple.len());
+
+        // Both methods should provide valid compression (less than 64 bits per vertex)
+        assert!(
+            stats_optimal.bits_per_vertex < 64.0,
+            "Optimal allocation should compress data"
+        );
+        assert!(
+            stats_simple.bits_per_vertex < 64.0,
+            "Simple allocation should compress data"
+        );
+
+        // Both methods should achieve some compression
+        assert!(
+            stats_optimal.compression_ratio > 1.0,
+            "Optimal should achieve compression"
+        );
+        assert!(
+            stats_simple.compression_ratio > 1.0,
+            "Simple should achieve compression"
+        );
+    }
+
+    #[test]
+    fn test_configuration_variants() {
+        let vertices: Vec<VertexId> = (1..1000).map(VertexId::from_u64).collect();
+
+        // Test different configuration presets
+        let configs = vec![
+            ("Paper", EliasFanoConfig::paper_specification()),
+            ("Small", EliasFanoConfig::small_lists()),
+            ("Large", EliasFanoConfig::large_lists()),
+        ];
+
+        for (name, config) in configs {
+            let encoded = PartitionedEliasFano::encode(&vertices, config).unwrap();
+            let stats = encoded.compression_stats();
+            let decoded = encoded.decode().unwrap();
+
+            assert_eq!(vertices.len(), decoded.len());
+            println!(
+                "{} config: {:.2} bits/vertex, {:.2}x compression",
+                name, stats.bits_per_vertex, stats.compression_ratio
+            );
+        }
     }
 }

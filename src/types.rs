@@ -302,11 +302,13 @@ pub type Properties = HashMap<String, PropertyValue>;
 pub struct PolyLSMConfig {
     /// Size ratio between adjacent levels (T in the paper)
     pub level_size_ratio: u32,
-    /// Size of a disk block in bytes
+    /// Number of levels in the LSM tree (L in the paper)
+    pub max_levels: u32,
+    /// Size of a disk block in bytes (B in the paper)
     pub block_size: u32,
     /// Bits per key for Bloom filters
     pub bloom_filter_bits_per_key: u32,
-    /// Bits per vertex for degree sketch
+    /// Bits per vertex for degree sketch (I in the paper)
     pub degree_sketch_bits_per_vertex: u32,
     /// Memory buffer size in bytes
     pub memtable_size: usize,
@@ -318,24 +320,162 @@ pub struct PolyLSMConfig {
     pub average_degree: f64,
 }
 
+impl PolyLSMConfig {
+    /// Create a configuration with exact paper specifications
+    pub fn paper_specification() -> Self {
+        Self {
+            level_size_ratio: 10,             // T = 10 (size ratio between levels)
+            max_levels: 4,                    // L = 4 (number of levels as specified in paper)
+            block_size: 4096,                 // B = 4KB (block size)
+            bloom_filter_bits_per_key: 10,    // 10 bits per key as specified
+            degree_sketch_bits_per_vertex: 8, // I = 8 bits per vertex ID
+            memtable_size: 64 * 1024 * 1024,  // 64MB
+            compression_enabled: true,
+            lookup_ratio: 0.5,    // θ_L (can be adjusted based on workload)
+            average_degree: 32.0, // Average degree estimate
+        }
+    }
+
+    /// Validate that configuration matches paper specifications
+    pub fn validate_paper_compliance(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+
+        if self.level_size_ratio != 10 {
+            errors.push(format!(
+                "T (level_size_ratio) should be 10, got {}",
+                self.level_size_ratio
+            ));
+        }
+
+        if self.max_levels != 4 {
+            errors.push(format!(
+                "L (max_levels) should be 4, got {}",
+                self.max_levels
+            ));
+        }
+
+        if self.block_size != 4096 {
+            errors.push(format!(
+                "B (block_size) should be 4096, got {}",
+                self.block_size
+            ));
+        }
+
+        if self.degree_sketch_bits_per_vertex != 8 {
+            errors.push(format!(
+                "I (degree_sketch_bits_per_vertex) should be 8, got {}",
+                self.degree_sketch_bits_per_vertex
+            ));
+        }
+
+        if self.bloom_filter_bits_per_key != 10 {
+            errors.push(format!(
+                "Bloom filter bits per key should be 10, got {}",
+                self.bloom_filter_bits_per_key
+            ));
+        }
+
+        if !errors.is_empty() {
+            return Err(format!(
+                "Paper compliance violations: {}",
+                errors.join(", ")
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get a summary of paper-specified parameters
+    pub fn paper_parameter_summary(&self) -> String {
+        format!(
+            "Paper Parameters: T={}, L={}, B={}KB, I={} bits, Bloom={}bpk",
+            self.level_size_ratio,
+            self.max_levels,
+            self.block_size / 1024,
+            self.degree_sketch_bits_per_vertex,
+            self.bloom_filter_bits_per_key
+        )
+    }
+}
+
 impl Default for PolyLSMConfig {
     fn default() -> Self {
-        Self {
-            level_size_ratio: 10,
-            block_size: 4096,
-            bloom_filter_bits_per_key: 10,
-            degree_sketch_bits_per_vertex: 8,
-            memtable_size: 64 * 1024 * 1024, // 64MB
-            compression_enabled: true,
-            lookup_ratio: 0.5,
-            average_degree: 32.0,
-        }
+        Self::paper_specification()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_paper_specification_compliance() {
+        let config = PolyLSMConfig::paper_specification();
+
+        // Verify all paper-specified parameters
+        assert_eq!(config.level_size_ratio, 10, "T should be 10");
+        assert_eq!(config.max_levels, 4, "L should be 4");
+        assert_eq!(config.block_size, 4096, "B should be 4KB");
+        assert_eq!(
+            config.degree_sketch_bits_per_vertex, 8,
+            "I should be 8 bits"
+        );
+        assert_eq!(
+            config.bloom_filter_bits_per_key, 10,
+            "Bloom filter should be 10 bits per key"
+        );
+
+        // Verify validation passes
+        assert!(config.validate_paper_compliance().is_ok());
+
+        // Test default config is paper-compliant
+        let default_config = PolyLSMConfig::default();
+        assert!(default_config.validate_paper_compliance().is_ok());
+
+        println!(
+            "Paper compliance verified: {}",
+            config.paper_parameter_summary()
+        );
+    }
+
+    #[test]
+    fn test_paper_compliance_validation() {
+        // Test invalid configurations
+        let mut config = PolyLSMConfig::default();
+
+        config.level_size_ratio = 8; // Wrong T
+        assert!(config.validate_paper_compliance().is_err());
+
+        config = PolyLSMConfig::default();
+        config.max_levels = 6; // Wrong L
+        assert!(config.validate_paper_compliance().is_err());
+
+        config = PolyLSMConfig::default();
+        config.block_size = 8192; // Wrong B
+        assert!(config.validate_paper_compliance().is_err());
+
+        config = PolyLSMConfig::default();
+        config.degree_sketch_bits_per_vertex = 16; // Wrong I
+        assert!(config.validate_paper_compliance().is_err());
+
+        config = PolyLSMConfig::default();
+        config.bloom_filter_bits_per_key = 15; // Wrong bloom filter config
+        assert!(config.validate_paper_compliance().is_err());
+    }
+
+    #[test]
+    fn test_paper_parameter_summary() {
+        let config = PolyLSMConfig::paper_specification();
+        let summary = config.paper_parameter_summary();
+
+        assert!(summary.contains("T=10"));
+        assert!(summary.contains("L=4"));
+        assert!(summary.contains("B=4KB"));
+        assert!(summary.contains("I=8 bits"));
+        assert!(summary.contains("Bloom=10bpk"));
+
+        println!("Parameter summary: {}", summary);
+    }
 
     #[test]
     fn test_vertex_id() {

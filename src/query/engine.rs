@@ -23,6 +23,12 @@ pub struct QueryStats {
     pub cache_hits: usize,
     pub cache_misses: usize,
     pub execution_time_ms: u64,
+    // Additional fields for query optimizer
+    pub vertices_scanned: usize,
+    pub predicates_applied: usize,
+    pub index_lookups: usize,
+    pub total_time_ms: u64,
+    pub results_returned: usize,
 }
 
 /// Query execution context
@@ -119,14 +125,20 @@ pub enum QueryPredicate {
     PropertyGreaterThan(String, PropertyValue),
     /// Property less than value
     PropertyLessThan(String, PropertyValue),
+    /// Property in range [min, max]
+    PropertyRange(String, Option<PropertyValue>, Option<PropertyValue>),
     /// Property exists
     PropertyExists(String),
+    /// Property has specific key (alias for PropertyExists)
+    HasProperty(String),
     /// Vertex ID in set
     VertexIdIn(HashSet<VertexId>),
     /// Vertex degree greater than threshold
     DegreeGreaterThan(usize),
     /// Vertex degree less than threshold
     DegreeLessThan(usize),
+    /// Vertex degree in range [min, max]
+    DegreeRange(usize, usize),
     /// Logical AND of predicates
     And(Vec<QueryPredicate>),
     /// Logical OR of predicates
@@ -1341,6 +1353,21 @@ impl QueryEngine {
                 QueryPredicate::Not(predicate) => {
                     let result = self.evaluate_predicate(vertex, predicate, context).await?;
                     Ok(!result)
+                }
+                // Add missing pattern matches for new predicate types
+                QueryPredicate::PropertyRange(_key, _min, _max) => {
+                    // TODO: Implement property range queries with property store integration
+                    Ok(true) // Simplified for now
+                }
+                QueryPredicate::HasProperty(_key) => {
+                    // TODO: Implement property existence check with property store integration
+                    Ok(true) // Simplified for now
+                }
+                QueryPredicate::DegreeRange(min_degree, max_degree) => {
+                    // Get neighbors and check degree range
+                    let neighbors = self.graph.get_neighbors(vertex).await?;
+                    let degree = neighbors.len();
+                    Ok(degree >= *min_degree && degree <= *max_degree)
                 }
             }
         })

@@ -208,6 +208,9 @@ pub fn encode_neighbors_compressed(neighbors: &[VertexId]) -> Result<Vec<u8>> {
     let config = EliasFanoConfig {
         segment_count: calculate_optimal_segments(neighbors.len()),
         prefix_length: 0, // Auto-calculate
+        max_segment_size: 4096,
+        min_segment_size: 64,
+        use_optimal_allocation: true,
     };
 
     let elias_fano = PartitionedEliasFano::encode(neighbors, config)?;

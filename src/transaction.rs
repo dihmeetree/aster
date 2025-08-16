@@ -610,6 +610,9 @@ impl Transaction {
             return Err(AsterError::transaction("Transaction already completed"));
         }
 
+        // Validate snapshot isolation before committing
+        self.validate_snapshot_isolation()?;
+
         self.is_active = false;
 
         // Validate transaction hasn't been aborted
@@ -641,10 +644,10 @@ impl Transaction {
             // Release all locks
             self.lock_manager.release_locks(self.id)?;
 
-            // Update global timestamp
+            // Update global timestamp - this becomes the commit timestamp
             let commit_timestamp = self.global_timestamp.fetch_add(1, Ordering::SeqCst) + 1;
 
-            // Log commit
+            // Log commit with proper timestamp for MVCC
             {
                 let mut commit_log = self.commit_log.lock();
                 commit_log.push((self.id, Timestamp::from_u64(commit_timestamp)));
@@ -725,6 +728,117 @@ impl Transaction {
         }
 
         changes
+    }
+
+    /// Check if a data version is visible to this transaction's snapshot
+    pub fn is_version_visible(
+        &self,
+        _version_timestamp: u64,
+        commit_timestamp: Option<u64>,
+    ) -> bool {
+        match commit_timestamp {
+            Some(ct) => {
+                // Data is visible if it was committed before our snapshot
+                ct <= self.snapshot_timestamp
+            }
+            None => {
+                // Uncommitted data is not visible to other transactions
+                false
+            }
+        }
+    }
+
+    /// Perform a snapshot read of vertices with MVCC
+    pub async fn snapshot_read_vertices(
+        &self,
+        vertex_ids: &[VertexId],
+        storage: &crate::storage::PolyLSM,
+    ) -> Result<Vec<(VertexId, Vec<crate::storage::MemTableEntry>)>> {
+        let mut visible_data = Vec::new();
+
+        for &vertex_id in vertex_ids {
+            // Record read for conflict detection
+            self.record_read(LockResource::Vertex(vertex_id))?;
+
+            // Get all versions of this vertex
+            let versions = storage.get_vertex_versions(vertex_id).await?;
+
+            // Filter versions visible to this snapshot
+            let mut visible_versions = Vec::new();
+            for entry in versions {
+                // Check if this version is visible to our snapshot
+                let commit_ts = self.get_commit_timestamp_for_version(&entry).await?;
+                if self.is_version_visible(entry.timestamp.as_u64(), commit_ts) {
+                    visible_versions.push(entry);
+                }
+            }
+
+            if !visible_versions.is_empty() {
+                visible_data.push((vertex_id, visible_versions));
+            }
+        }
+
+        Ok(visible_data)
+    }
+
+    /// Perform a snapshot read of a single vertex with MVCC
+    pub async fn snapshot_read_vertex(
+        &self,
+        vertex_id: VertexId,
+        storage: &crate::storage::PolyLSM,
+    ) -> Result<Option<Vec<crate::storage::MemTableEntry>>> {
+        let results = self.snapshot_read_vertices(&[vertex_id], storage).await?;
+        Ok(results.into_iter().next().map(|(_, entries)| entries))
+    }
+
+    /// Get the commit timestamp for a version (if committed)
+    async fn get_commit_timestamp_for_version(
+        &self,
+        entry: &crate::storage::MemTableEntry,
+    ) -> Result<Option<u64>> {
+        // Check the commit log to see if the transaction that created this version has committed
+        let commit_log = self.commit_log.lock();
+        for (_, commit_ts) in commit_log.iter() {
+            if commit_ts.as_u64() >= entry.timestamp.as_u64() {
+                return Ok(Some(commit_ts.as_u64()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Validate snapshot isolation by checking for write-write conflicts
+    pub fn validate_snapshot_isolation(&self) -> Result<()> {
+        if !self.is_active {
+            return Err(AsterError::transaction("Transaction not active"));
+        }
+
+        // Get all active transactions that started after our snapshot
+        let active = self
+            .active_transactions
+            .read()
+            .map_err(|_| AsterError::transaction("Failed to acquire read lock"))?;
+
+        let our_write_set = if let Some(tx_info) = active.get(&self.id) {
+            &tx_info.write_set
+        } else {
+            return Err(AsterError::transaction("Transaction not found"));
+        };
+
+        // Check for conflicts with transactions that committed after our snapshot
+        for (_, tx_info) in active.iter() {
+            if tx_info.id != self.id && tx_info.start_time.as_u64() > self.snapshot_timestamp {
+                // Check for write-write conflicts
+                for resource in &tx_info.write_set {
+                    if our_write_set.contains(resource) {
+                        return Err(AsterError::conflict(
+                            "Write-write conflict detected during validation",
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -851,6 +965,99 @@ mod tests {
 
         let stats = manager.get_stats();
         assert_eq!(stats.active_transactions, 0);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_isolation() {
+        let manager = TransactionManager::new();
+
+        // Begin two transactions
+        let tx1 = manager.begin().unwrap();
+        let tx2 = manager.begin().unwrap();
+
+        // Verify different snapshot timestamps
+        assert!(tx1.snapshot_timestamp() <= tx2.snapshot_timestamp());
+
+        // Test version visibility
+        let older_timestamp = tx1.snapshot_timestamp() - 1;
+        let newer_timestamp = tx1.snapshot_timestamp() + 1;
+
+        // Committed data before snapshot should be visible
+        assert!(tx1.is_version_visible(older_timestamp, Some(older_timestamp)));
+
+        // Committed data after snapshot should not be visible
+        assert!(!tx1.is_version_visible(newer_timestamp, Some(newer_timestamp)));
+
+        // Uncommitted data should not be visible
+        assert!(!tx1.is_version_visible(older_timestamp, None));
+
+        tx1.commit().await.unwrap();
+        tx2.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_isolation_validation() {
+        let manager = TransactionManager::new();
+
+        // Begin two concurrent transactions
+        let tx1 = manager.begin().unwrap();
+        let tx2 = manager.begin().unwrap();
+
+        let resource = LockResource::Vertex(VertexId::from_u64(1));
+
+        // Both transactions write to the same resource
+        tx1.record_write(resource.clone()).unwrap();
+        // tx2 should fail to acquire write lock due to conflict
+        assert!(tx2.record_write(resource).is_err());
+
+        // Validation should succeed for tx1
+        assert!(tx1.validate_snapshot_isolation().is_ok());
+
+        tx1.commit().await.unwrap();
+        tx2.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_read_transactions() {
+        let manager = TransactionManager::new();
+
+        // Begin multiple read transactions
+        let tx1 = manager.begin().unwrap();
+        let tx2 = manager.begin().unwrap();
+        let tx3 = manager.begin().unwrap();
+
+        let resource = LockResource::Vertex(VertexId::from_u64(1));
+
+        // All should be able to acquire read locks
+        tx1.record_read(resource.clone()).unwrap();
+        tx2.record_read(resource.clone()).unwrap();
+        tx3.record_read(resource.clone()).unwrap();
+
+        // All should validate successfully
+        assert!(tx1.validate_snapshot_isolation().is_ok());
+        assert!(tx2.validate_snapshot_isolation().is_ok());
+        assert!(tx3.validate_snapshot_isolation().is_ok());
+
+        tx1.commit().await.unwrap();
+        tx2.commit().await.unwrap();
+        tx3.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_repeatable_reads() {
+        let manager = TransactionManager::new();
+        let tx = manager.begin().unwrap();
+
+        // Verify the same snapshot timestamp throughout transaction
+        let initial_snapshot = tx.snapshot_timestamp();
+
+        // Simulate some time passing
+        std::thread::sleep(Duration::from_millis(1));
+
+        // Snapshot timestamp should remain the same
+        assert_eq!(tx.snapshot_timestamp(), initial_snapshot);
+
+        tx.commit().await.unwrap();
     }
 
     #[test]
