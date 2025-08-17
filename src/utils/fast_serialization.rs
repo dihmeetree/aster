@@ -3,7 +3,6 @@
 //! This module provides optimized serialization for hot paths in the database,
 //! replacing bincode with faster custom formats for critical data structures.
 
-use crate::storage::memtable::MemTableEntry;
 use crate::types::Properties;
 use crate::{AsterError, EdgeId, PropertyValue, Result, Timestamp, VertexId};
 use std::collections::HashMap;
