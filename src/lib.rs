@@ -23,6 +23,8 @@ pub mod types;
 pub mod utils;
 pub mod validation;
 
+use tracing::{debug, error, info, instrument, warn};
+
 pub use error::{AsterError, Result};
 pub use graph::{Edge, Graph, Vertex};
 pub use metrics::{DatabaseMetrics, MetricsCollector, MetricsConfig};
@@ -161,63 +163,90 @@ impl AsterDB {
     }
 
     /// Create a new AsterDB instance with the given configuration
+    #[instrument(level = "info", skip(config), fields(path = %path.as_ref().display()))]
     pub async fn open_with_config<P: AsRef<std::path::Path>>(
         path: P,
         config: AsterDBConfig,
     ) -> Result<Self> {
+        let start_time = std::time::Instant::now();
+        info!("Opening AsterDB database");
+
         let path_ref = path.as_ref();
+        info!(storage_path = %path_ref.display(), "Initializing storage layer");
         let storage = Arc::new(PolyLSM::open(path_ref).await?);
+        info!("Storage layer initialized successfully");
+
+        info!("Initializing transaction manager");
         let transaction_manager = Arc::new(TransactionManager::new_with_config(
             config.transaction_config.clone(),
         ));
+        info!("Transaction manager initialized successfully");
 
         // Initialize property store if enabled (as separate column family)
         let property_store = if config.enable_properties {
+            info!("Initializing property store");
             let property_path = path_ref.join("properties");
             let prop_store =
                 PropertyStore::new(property_path, config.property_store_config.clone())?;
+            info!("Property store initialized successfully");
             Some(Arc::new(prop_store))
         } else {
+            info!("Property store disabled");
             None
         };
 
         // Initialize recovery manager if enabled
         let recovery_manager = if config.enable_recovery {
+            info!("Initializing recovery manager");
             let recovery_mgr = Arc::new(RecoveryManager::new(config.recovery_config.clone())?);
 
             // Perform database recovery on startup
+            info!("Performing database recovery");
             recovery_mgr
                 .recover_database(&storage, &transaction_manager)
                 .await?;
+            info!("Database recovery completed");
 
             // Start background recovery tasks
+            info!("Starting background recovery tasks");
             recovery_mgr
                 .start_background_tasks(Arc::clone(&storage))
                 .await?;
+            info!("Recovery manager initialized successfully");
 
             Some(recovery_mgr)
         } else {
+            info!("Recovery manager disabled");
             None
         };
 
         // Initialize metrics collector if enabled
         let metrics_collector = if config.enable_metrics {
+            info!("Initializing metrics collector");
             let mut collector = MetricsCollector::new(config.metrics_config.clone());
             collector.start_background_collection()?;
+            info!("Metrics collector initialized successfully");
             Some(Arc::new(collector))
         } else {
+            info!("Metrics collection disabled");
             None
         };
 
         // Initialize Gremlin engine
+        info!("Initializing Gremlin engine");
         let graph = Arc::new(Graph::new(&storage));
         let gremlin_engine = GremlinEngine::new(graph, property_store.clone());
+        info!("Gremlin engine initialized successfully");
 
         // Initialize range scan optimizer
+        info!("Initializing range scan optimizer");
         let range_scan_optimizer = RangeScanOptimizer::new(property_store.clone());
+        info!("Range scan optimizer initialized successfully");
 
         // Create edge registry
+        info!("Initializing edge registry");
         let edge_registry = Arc::new(RwLock::new(HashMap::new()));
+        info!("Edge registry initialized successfully");
 
         let mut db = Self {
             storage,
@@ -232,10 +261,21 @@ impl AsterDB {
         };
 
         // Set edge registry on gremlin engine
+        info!("Configuring edge registry");
         db.gremlin_engine
             .set_edge_registry(Arc::new(EdgeRegistryImpl {
                 registry: edge_registry,
             }));
+
+        let total_duration = start_time.elapsed();
+        info!(
+            duration_ms = total_duration.as_millis(),
+            path = %path_ref.display(),
+            properties_enabled = db.config.enable_properties,
+            recovery_enabled = db.config.enable_recovery,
+            metrics_enabled = db.config.enable_metrics,
+            "AsterDB database opened successfully"
+        );
 
         Ok(db)
     }
@@ -521,27 +561,80 @@ impl AsterDB {
     }
 
     /// Set properties for a vertex (requires properties to be enabled)
+    #[instrument(level = "debug", skip(self, properties), fields(vertex_id = %vertex_id, property_count = properties.len()))]
     pub async fn set_vertex_properties(
         &self,
         vertex_id: VertexId,
         properties: Properties,
     ) -> Result<()> {
-        if let Some(ref property_store) = self.property_store {
+        debug!("Setting vertex properties");
+        let start_time = std::time::Instant::now();
+
+        let result = if let Some(ref property_store) = self.property_store {
             property_store
                 .set_vertex_properties(vertex_id, properties)
                 .await
         } else {
+            error!("Property operations attempted but properties not enabled");
             Err(AsterError::configuration("Properties not enabled"))
+        };
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(_) => debug!(
+                duration_ms = duration.as_millis(),
+                "Vertex properties set successfully"
+            ),
+            Err(e) => {
+                warn!(duration_ms = duration.as_millis(), error = %e, "Failed to set vertex properties")
+            }
         }
+
+        // Record metrics
+        if let Some(ref metrics) = self.metrics_collector {
+            metrics.record_write(duration.as_millis() as f64);
+            if result.is_err() {
+                metrics.record_error();
+            }
+        }
+
+        result
     }
 
     /// Get properties for a vertex (requires properties to be enabled)
+    #[instrument(level = "debug", skip(self), fields(vertex_id = %vertex_id))]
     pub async fn get_vertex_properties(&self, vertex_id: VertexId) -> Result<Properties> {
-        if let Some(ref property_store) = self.property_store {
+        debug!("Getting vertex properties");
+        let start_time = std::time::Instant::now();
+
+        let result = if let Some(ref property_store) = self.property_store {
             property_store.get_vertex_properties(vertex_id).await
         } else {
+            error!("Property operations attempted but properties not enabled");
             Err(AsterError::configuration("Properties not enabled"))
+        };
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(props) => debug!(
+                duration_ms = duration.as_millis(),
+                property_count = props.len(),
+                "Vertex properties retrieved successfully"
+            ),
+            Err(e) => {
+                warn!(duration_ms = duration.as_millis(), error = %e, "Failed to get vertex properties")
+            }
         }
+
+        // Record metrics
+        if let Some(ref metrics) = self.metrics_collector {
+            metrics.record_read(duration.as_millis() as f64);
+            if result.is_err() {
+                metrics.record_error();
+            }
+        }
+
+        result
     }
 
     /// Set properties for an edge (requires properties to be enabled)
@@ -609,7 +702,11 @@ impl AsterDB {
     }
 
     /// Execute a Gremlin traversal query
+    #[instrument(level = "info", skip(self, traversal), fields(traversal_type = ?traversal))]
     pub async fn gremlin(&self, traversal: &GremlinTraversal) -> Result<GremlinResultSet> {
+        info!("Executing Gremlin traversal");
+        let start_time = std::time::Instant::now();
+
         let query_context = QueryContext::default();
         let mut gremlin_context = GremlinContext::new(query_context);
 
@@ -617,6 +714,21 @@ impl AsterDB {
             .gremlin_engine
             .execute(traversal, &mut gremlin_context)
             .await?;
+
+        let duration = start_time.elapsed();
+        info!(
+            duration_ms = duration.as_millis(),
+            result_count = results.len(),
+            vertices_visited = stats.vertices_visited,
+            edges_traversed = stats.edges_traversed,
+            "Gremlin traversal completed"
+        );
+
+        // Record metrics
+        if let Some(ref metrics) = self.metrics_collector {
+            metrics.record_query(duration.as_millis() as f64);
+        }
+
         Ok(GremlinResultSet::new(results, stats))
     }
 
@@ -631,8 +743,19 @@ impl AsterDB {
     }
 
     /// Parse and execute a Gremlin query string
+    #[instrument(level = "info", skip(self), fields(query_length = query.len()))]
     pub async fn gremlin_query(&self, query: &str) -> Result<GremlinResultSet> {
+        info!(query = %query, "Parsing and executing Gremlin query");
+
+        let parse_start = std::time::Instant::now();
         let traversal = GremlinEngine::parse_query(query)?;
+        let parse_time = parse_start.elapsed();
+
+        debug!(
+            parse_time_ms = parse_time.as_millis(),
+            "Query parsing completed"
+        );
+
         self.gremlin(&traversal).await
     }
 

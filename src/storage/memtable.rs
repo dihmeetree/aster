@@ -6,6 +6,7 @@ use crate::{AsterError, Result, Timestamp, VertexId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Entry type in the LSM-tree
@@ -74,8 +75,8 @@ impl MemTableEntry {
 pub struct MemTable {
     /// The actual data, keyed by vertex ID
     data: Arc<RwLock<BTreeMap<VertexId, Vec<MemTableEntry>>>>,
-    /// Current size in bytes (approximate)
-    size_bytes: Arc<RwLock<usize>>,
+    /// Current size in bytes (atomic for lock-free reads)
+    size_bytes: AtomicUsize,
     /// Maximum size before flush is triggered
     max_size_bytes: usize,
     /// Creation timestamp
@@ -87,7 +88,7 @@ impl MemTable {
     pub fn new(max_size_bytes: usize) -> Self {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),
-            size_bytes: Arc::new(RwLock::new(0)),
+            size_bytes: AtomicUsize::new(0),
             max_size_bytes,
             created_at: Timestamp::now(),
         }
@@ -97,16 +98,15 @@ impl MemTable {
     pub fn insert(&self, vertex_id: VertexId, entry: MemTableEntry) -> Result<()> {
         let entry_size = entry.size_bytes();
 
+        // Single write lock for data insertion
         {
             let mut data = self.data.write();
             let entries = data.entry(vertex_id).or_insert_with(Vec::new);
             entries.push(entry);
         }
 
-        {
-            let mut size = self.size_bytes.write();
-            *size += entry_size;
-        }
+        // Atomic update for size - no lock needed
+        self.size_bytes.fetch_add(entry_size, Ordering::Relaxed);
 
         Ok(())
     }
@@ -115,17 +115,22 @@ impl MemTable {
     pub fn get(&self, vertex_id: VertexId) -> Option<Vec<MemTableEntry>> {
         let data = self.data.read();
         data.get(&vertex_id).map(|entries| {
-            let mut sorted_entries = entries.clone();
-            // Sort by timestamp, newest first
-            sorted_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            sorted_entries
+            // Create sorted indices instead of cloning entire entries
+            let mut indices: Vec<usize> = (0..entries.len()).collect();
+            indices.sort_by(|&a, &b| entries[b].timestamp.cmp(&entries[a].timestamp));
+
+            // Build result vector by cloning only the sorted entries
+            indices.into_iter().map(|i| entries[i].clone()).collect()
         })
     }
 
     /// Get the latest entry for a vertex ID
     pub fn get_latest(&self, vertex_id: VertexId) -> Option<MemTableEntry> {
-        self.get(vertex_id)
-            .and_then(|entries| entries.into_iter().next())
+        let data = self.data.read();
+        data.get(&vertex_id).and_then(|entries| {
+            // Find the entry with the maximum timestamp without cloning all entries
+            entries.iter().max_by_key(|entry| entry.timestamp).cloned()
+        })
     }
 
     /// Check if MemTable contains any entry for a vertex ID
@@ -136,7 +141,7 @@ impl MemTable {
 
     /// Get current size in bytes
     pub fn size_bytes(&self) -> usize {
-        *self.size_bytes.read()
+        self.size_bytes.load(Ordering::Relaxed)
     }
 
     /// Check if MemTable is full and needs flushing
@@ -211,10 +216,8 @@ impl MemTable {
             let mut data = self.data.write();
             data.clear();
         }
-        {
-            let mut size = self.size_bytes.write();
-            *size = 0;
-        }
+        // Atomic reset for size - no lock needed
+        self.size_bytes.store(0, Ordering::Relaxed);
     }
 }
 

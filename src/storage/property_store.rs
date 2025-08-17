@@ -9,6 +9,7 @@
 use crate::storage::{EntryType, MemTable, MemTableEntry, SSTableReader, SSTableWriter};
 use crate::types::Properties;
 use crate::utils::bloom_filter::BloomFilter;
+use crate::utils::fast_serialization::{FastSerialize, FastSerializeBuffer};
 use crate::{AsterError, EdgeId, PropertyValue, Result, Timestamp, VertexId};
 
 use parking_lot::{Mutex, RwLock};
@@ -34,6 +35,52 @@ pub struct PropertyEntry {
     pub entry_type: PropertyEntryType,
     pub properties: Properties,
     pub timestamp: Timestamp,
+}
+
+impl FastSerialize for PropertyEntry {
+    fn serialize_fast(&self, writer: &mut dyn std::io::Write) -> Result<()> {
+        // Write entry type as u8
+        let type_byte = match self.entry_type {
+            PropertyEntryType::Set => 0u8,
+            PropertyEntryType::Delete => 1u8,
+            PropertyEntryType::DeleteAll => 2u8,
+        };
+        writer.write_all(&[type_byte])?;
+
+        // Write timestamp
+        self.timestamp.serialize_fast(writer)?;
+
+        // Write properties
+        self.properties.serialize_fast(writer)?;
+
+        Ok(())
+    }
+
+    fn deserialize_fast(reader: &mut dyn std::io::Read) -> Result<Self> {
+        use std::io::Read;
+
+        // Read entry type
+        let mut type_bytes = [0u8; 1];
+        reader.read_exact(&mut type_bytes)?;
+        let entry_type = match type_bytes[0] {
+            0 => PropertyEntryType::Set,
+            1 => PropertyEntryType::Delete,
+            2 => PropertyEntryType::DeleteAll,
+            _ => return Err(AsterError::storage("Invalid PropertyEntryType")),
+        };
+
+        // Read timestamp
+        let timestamp = Timestamp::deserialize_fast(reader)?;
+
+        // Read properties
+        let properties = Properties::deserialize_fast(reader)?;
+
+        Ok(PropertyEntry {
+            entry_type,
+            properties,
+            timestamp,
+        })
+    }
 }
 
 impl PropertyEntry {
@@ -255,7 +302,14 @@ impl PropertyStore {
         properties: Properties,
     ) -> Result<()> {
         let entry = PropertyEntry::new_set(properties.clone(), Timestamp::now());
-        let encoded_entry = bincode::serialize(&entry)?;
+
+        // Use fast serialization for better performance
+        let mut buffer = FastSerializeBuffer::with_capacity(
+            32 + properties.len() * 64, // Estimate size based on property count
+        );
+        entry.serialize_fast(&mut buffer)?;
+        let encoded_entry = buffer.into_vec();
+
         let mem_entry = MemTableEntry::new_pivot(encoded_entry, entry.timestamp);
 
         // Store in MemTable
@@ -293,7 +347,14 @@ impl PropertyStore {
     /// Set properties for an edge
     pub async fn set_edge_properties(&self, edge_id: EdgeId, properties: Properties) -> Result<()> {
         let entry = PropertyEntry::new_set(properties.clone(), Timestamp::now());
-        let encoded_entry = bincode::serialize(&entry)?;
+
+        // Use fast serialization for better performance
+        let mut buffer = FastSerializeBuffer::with_capacity(
+            32 + properties.len() * 64, // Estimate size based on property count
+        );
+        entry.serialize_fast(&mut buffer)?;
+        let encoded_entry = buffer.into_vec();
+
         let mem_entry = MemTableEntry::new_pivot(encoded_entry, entry.timestamp);
 
         // Convert EdgeId to VertexId for storage compatibility
@@ -339,7 +400,12 @@ impl PropertyStore {
         keys: Vec<String>,
     ) -> Result<()> {
         let entry = PropertyEntry::new_delete(keys.clone(), Timestamp::now());
-        let encoded_entry = bincode::serialize(&entry)?;
+
+        // Use fast serialization for better performance
+        let mut buffer = FastSerializeBuffer::with_capacity(64); // Small buffer for delete operations
+        entry.serialize_fast(&mut buffer)?;
+        let encoded_entry = buffer.into_vec();
+
         let mem_entry = MemTableEntry::new_delta(encoded_entry, entry.timestamp);
 
         // Store deletion entry
@@ -542,7 +608,7 @@ impl PropertyStore {
         let mut current_properties = Properties::new();
 
         for entry in entries {
-            let property_entry: PropertyEntry = bincode::deserialize(&entry.data)?;
+            let property_entry: PropertyEntry = FastSerializeBuffer::deserialize(&entry.data)?;
 
             match property_entry.entry_type {
                 PropertyEntryType::Set => {

@@ -875,10 +875,21 @@ impl MetricsCollector {
         output
     }
 
-    /// Get system health summary
+    /// Get system health summary with comprehensive health checks
     pub fn get_health_summary(&self) -> HealthMetrics {
         let metrics = self.get_current_metrics();
         let alerts = self.active_alerts.lock();
+        let mut health_checks = HashMap::new();
+        let mut warnings = Vec::new();
+
+        // Perform comprehensive health checks
+        let storage_health = self.check_storage_health(&metrics, &mut health_checks, &mut warnings);
+        let transaction_health =
+            self.check_transaction_health(&metrics, &mut health_checks, &mut warnings);
+        let query_health = self.check_query_health(&metrics, &mut health_checks, &mut warnings);
+        let recovery_health =
+            self.check_recovery_health(&metrics, &mut health_checks, &mut warnings);
+        let cache_health = self.check_cache_health(&metrics, &mut health_checks, &mut warnings);
 
         // Determine overall health status
         let status = if alerts.iter().any(|a| {
@@ -891,6 +902,7 @@ impl MetricsCollector {
         } else if alerts
             .iter()
             .any(|a| matches!(a.severity, AlertSeverity::Warning))
+            || warnings.len() > 3
         {
             HealthStatus::Warning
         } else {
@@ -898,19 +910,250 @@ impl MetricsCollector {
         };
 
         let mut component_health = HashMap::new();
-        component_health.insert("storage".to_string(), 0.9); // Example scores
-        component_health.insert("transactions".to_string(), 0.95);
-        component_health.insert("queries".to_string(), 0.88);
-        component_health.insert("recovery".to_string(), 0.92);
+        component_health.insert("storage".to_string(), storage_health);
+        component_health.insert("transactions".to_string(), transaction_health);
+        component_health.insert("queries".to_string(), query_health);
+        component_health.insert("recovery".to_string(), recovery_health);
+        component_health.insert("cache".to_string(), cache_health);
 
         HealthMetrics {
             status,
             component_health,
             active_alerts: alerts.clone(),
-            health_checks: HashMap::new(),
-            warnings: Vec::new(),
+            health_checks,
+            warnings,
             last_health_check: current_timestamp(),
         }
+    }
+
+    /// Check storage subsystem health
+    fn check_storage_health(
+        &self,
+        metrics: &DatabaseMetrics,
+        health_checks: &mut HashMap<String, HealthCheckResult>,
+        warnings: &mut Vec<String>,
+    ) -> f64 {
+        let start_time = std::time::Instant::now();
+
+        // Check LSM tree health
+        let lsm_health: f64 = if metrics.storage.lsm_stats.levels.len() > 10 {
+            warnings.push("LSM tree has many levels, compaction may be behind".to_string());
+            0.7
+        } else if metrics.storage.lsm_stats.levels.len() > 7 {
+            warnings.push("LSM tree level count is elevated".to_string());
+            0.85
+        } else {
+            1.0
+        };
+
+        // Check memory table health
+        let memtable_health: f64 =
+            if metrics.storage.lsm_stats.active_memtable.size_bytes > 64 * 1024 * 1024 {
+                warnings.push("Active MemTable is large, may need flushing".to_string());
+                0.8
+            } else {
+                1.0
+            };
+
+        // Check compaction health
+        let compaction_health: f64 = if metrics.storage.compaction_stats.compression_ratio < 0.3 {
+            warnings.push("Poor compression ratio indicates data quality issues".to_string());
+            0.7
+        } else {
+            1.0
+        };
+
+        health_checks.insert(
+            "storage_lsm".to_string(),
+            HealthCheckResult {
+                passed: lsm_health > 0.8,
+                message: format!(
+                    "LSM tree has {} levels",
+                    metrics.storage.lsm_stats.levels.len()
+                ),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        health_checks.insert(
+            "storage_memtable".to_string(),
+            HealthCheckResult {
+                passed: memtable_health > 0.9,
+                message: format!(
+                    "MemTable size: {} bytes",
+                    metrics.storage.lsm_stats.active_memtable.size_bytes
+                ),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        // Overall storage health is the minimum of all subsystem healths
+        lsm_health.min(memtable_health).min(compaction_health)
+    }
+
+    /// Check transaction subsystem health
+    fn check_transaction_health(
+        &self,
+        metrics: &DatabaseMetrics,
+        health_checks: &mut HashMap<String, HealthCheckResult>,
+        warnings: &mut Vec<String>,
+    ) -> f64 {
+        let start_time = std::time::Instant::now();
+
+        // Check transaction throughput
+        let tx_health: f64 =
+            if metrics.transactions.commit_rate < 10.0 && metrics.system.total_requests > 1000 {
+                warnings.push("Low transaction commit rate detected".to_string());
+                0.6
+            } else {
+                1.0
+            };
+
+        // Check deadlock rate
+        let deadlock_health: f64 = if metrics.transactions.deadlocks_detected > 0 {
+            warnings.push("Deadlocks detected in transaction system".to_string());
+            0.8
+        } else {
+            1.0
+        };
+
+        health_checks.insert(
+            "transaction_performance".to_string(),
+            HealthCheckResult {
+                passed: tx_health > 0.8,
+                message: format!("Commit rate: {:.1}/sec", metrics.transactions.commit_rate),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        tx_health.min(deadlock_health)
+    }
+
+    /// Check query subsystem health  
+    fn check_query_health(
+        &self,
+        metrics: &DatabaseMetrics,
+        health_checks: &mut HashMap<String, HealthCheckResult>,
+        warnings: &mut Vec<String>,
+    ) -> f64 {
+        let start_time = std::time::Instant::now();
+
+        // Check query performance
+        let query_health: f64 = if metrics.queries.avg_execution_time_ms > 1000.0 {
+            warnings.push("High average query execution time".to_string());
+            0.6
+        } else if metrics.queries.avg_execution_time_ms > 500.0 {
+            warnings.push("Elevated query execution time".to_string());
+            0.8
+        } else {
+            1.0
+        };
+
+        // Check cache efficiency
+        let cache_health: f64 = if metrics.queries.cache_hit_ratio < 0.5 {
+            warnings.push("Low query cache hit ratio".to_string());
+            0.7
+        } else if metrics.queries.cache_hit_ratio < 0.8 {
+            0.9
+        } else {
+            1.0
+        };
+
+        health_checks.insert(
+            "query_performance".to_string(),
+            HealthCheckResult {
+                passed: query_health > 0.8,
+                message: format!(
+                    "Avg execution time: {:.1}ms",
+                    metrics.queries.avg_execution_time_ms
+                ),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        query_health.min(cache_health)
+    }
+
+    /// Check recovery subsystem health
+    fn check_recovery_health(
+        &self,
+        metrics: &DatabaseMetrics,
+        health_checks: &mut HashMap<String, HealthCheckResult>,
+        warnings: &mut Vec<String>,
+    ) -> f64 {
+        let start_time = std::time::Instant::now();
+
+        // Check WAL file count
+        let wal_health: f64 = if metrics.recovery.wal_file_count > 100 {
+            warnings.push("Large number of WAL files, consider archiving".to_string());
+            0.7
+        } else if metrics.recovery.wal_file_count > 50 {
+            warnings.push("WAL file count is elevated".to_string());
+            0.85
+        } else {
+            1.0
+        };
+
+        // Check recovery health score
+        let recovery_score = metrics.recovery.health_score;
+
+        health_checks.insert(
+            "recovery_wal".to_string(),
+            HealthCheckResult {
+                passed: wal_health > 0.8,
+                message: format!("WAL files: {}", metrics.recovery.wal_file_count),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        wal_health.min(recovery_score)
+    }
+
+    /// Check cache subsystem health
+    fn check_cache_health(
+        &self,
+        metrics: &DatabaseMetrics,
+        health_checks: &mut HashMap<String, HealthCheckResult>,
+        warnings: &mut Vec<String>,
+    ) -> f64 {
+        let start_time = std::time::Instant::now();
+
+        // Check cache hit ratio
+        let cache_efficiency: f64 = if metrics.storage.cache_stats.hit_ratio < 0.5 {
+            warnings.push("Low block cache hit ratio".to_string());
+            0.6
+        } else if metrics.storage.cache_stats.hit_ratio < 0.8 {
+            0.85
+        } else {
+            1.0
+        };
+
+        // Check cache eviction rate
+        let eviction_health: f64 = if metrics.storage.cache_stats.evictions
+            > metrics.storage.cache_stats.hits / 2
+        {
+            warnings.push("High cache eviction rate, consider increasing cache size".to_string());
+            0.7
+        } else {
+            1.0
+        };
+
+        health_checks.insert(
+            "cache_efficiency".to_string(),
+            HealthCheckResult {
+                passed: cache_efficiency > 0.8,
+                message: format!("Hit ratio: {:.2}", metrics.storage.cache_stats.hit_ratio),
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                timestamp: current_timestamp(),
+            },
+        );
+
+        cache_efficiency.min(eviction_health)
     }
 }
 

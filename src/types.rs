@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// Unique identifier for vertices
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -250,6 +251,30 @@ impl PartialOrd for PropertyValue {
 }
 
 impl Eq for PropertyValue {}
+
+impl Hash for PropertyValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            PropertyValue::Null => {}
+            PropertyValue::Bool(b) => b.hash(state),
+            PropertyValue::Int(i) => i.hash(state),
+            PropertyValue::Float(f) => {
+                // Handle float hashing by converting to bits
+                f.to_bits().hash(state);
+            }
+            PropertyValue::String(s) => s.hash(state),
+            PropertyValue::Bytes(b) => b.hash(state),
+            PropertyValue::List(l) => l.hash(state),
+            PropertyValue::Map(m) => {
+                // For consistent hashing of maps, we need to sort keys
+                let mut sorted_entries: Vec<_> = m.iter().collect();
+                sorted_entries.sort_by_key(|(k, _)| *k);
+                sorted_entries.hash(state);
+            }
+        }
+    }
+}
 
 impl Ord for PropertyValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {

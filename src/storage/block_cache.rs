@@ -257,12 +257,30 @@ impl BlockCache {
             let mut access_order = self.access_order.lock();
             access_order.insert(entry.last_accessed, block_id);
 
-            // Decompress if needed
+            // Optimize: Avoid clone for uncompressed data when possible
             let data = if entry.is_compressed {
-                self.decompress(&entry.data)
-                    .unwrap_or_else(|_| entry.data.clone())
+                // For compressed data, we must decompress to a new buffer
+                self.decompress(&entry.data).unwrap_or_else(|_| {
+                    // If decompression fails, get a buffer from pool if available
+                    if self.config.enable_memory_pool {
+                        let mut pool = self.memory_pool.lock();
+                        let mut buffer = pool.get_block(entry.data.len());
+                        buffer.extend_from_slice(&entry.data);
+                        buffer
+                    } else {
+                        entry.data.clone()
+                    }
+                })
             } else {
-                entry.data.clone()
+                // For uncompressed data, reuse buffer from pool when possible
+                if self.config.enable_memory_pool {
+                    let mut pool = self.memory_pool.lock();
+                    let mut buffer = pool.get_block(entry.data.len());
+                    buffer.extend_from_slice(&entry.data);
+                    buffer
+                } else {
+                    entry.data.clone()
+                }
             };
 
             stats.update_hit_ratio();

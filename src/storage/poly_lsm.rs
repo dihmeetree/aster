@@ -147,7 +147,7 @@ impl PolyLSM {
         fs::create_dir_all(&data_dir)?;
 
         // Initialize levels according to paper specification (L=4)
-        let mut levels = Vec::new();
+        let mut levels = Vec::with_capacity(config.max_levels as usize);
         let mut current_max_size = 64 * 1024 * 1024; // Start with 64MB for L1
 
         for i in 0..config.max_levels {
@@ -727,11 +727,16 @@ impl PolyLSM {
     ) -> Result<Vec<(VertexId, MemTableEntry)>> {
         let mut results = Vec::new();
 
+        // Pre-convert bounds once to avoid repeated conversions
+        let start_u64 = start.as_u64();
+        let end_u64 = end.as_u64();
+
         // Check active memtable
         {
             let memtable = self.active_memtable.read();
             for (vertex_id, entry) in memtable.iter() {
-                if vertex_id.as_u64() >= start.as_u64() && vertex_id.as_u64() <= end.as_u64() {
+                let vertex_u64 = vertex_id.as_u64();
+                if vertex_u64 >= start_u64 && vertex_u64 <= end_u64 {
                     results.push((vertex_id, entry.clone()));
                 }
             }
@@ -742,8 +747,9 @@ impl PolyLSM {
             let immutable_memtables = self.immutable_memtables.read();
             for frozen_memtable in immutable_memtables.iter() {
                 for (vertex_id, entry) in frozen_memtable.iter() {
-                    if vertex_id.as_u64() >= start.as_u64() && vertex_id.as_u64() <= end.as_u64() {
-                        results.push((vertex_id.clone(), entry.clone()));
+                    let vertex_u64 = vertex_id.as_u64();
+                    if vertex_u64 >= start_u64 && vertex_u64 <= end_u64 {
+                        results.push((vertex_id, entry.clone()));
                     }
                 }
             }
@@ -755,8 +761,7 @@ impl PolyLSM {
             for sstable in &level.sstables {
                 // Quick check if this SSTable might contain data in our range
                 let metadata = sstable.metadata();
-                if metadata.last_key.as_u64() >= start.as_u64()
-                    && metadata.first_key.as_u64() <= end.as_u64()
+                if metadata.last_key.as_u64() >= start_u64 && metadata.first_key.as_u64() <= end_u64
                 {
                     let sstable_results = sstable.range(start, end).await?;
                     results.extend(sstable_results);
@@ -767,15 +772,24 @@ impl PolyLSM {
         // Sort by vertex ID and deduplicate, keeping the newest entry for each vertex
         results.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.timestamp.cmp(&a.1.timestamp)));
 
-        let mut deduped_results = Vec::new();
+        // Deduplicate in-place to avoid extra allocation
+        let mut write_index = 0;
         let mut last_vertex_id = None;
 
-        for (vertex_id, entry) in results {
+        for read_index in 0..results.len() {
+            let vertex_id = results[read_index].0;
             if last_vertex_id != Some(vertex_id) {
-                deduped_results.push((vertex_id, entry));
+                if write_index != read_index {
+                    // Move instead of clone when indices differ
+                    results.swap(write_index, read_index);
+                }
+                write_index += 1;
                 last_vertex_id = Some(vertex_id);
             }
         }
+
+        results.truncate(write_index);
+        let deduped_results = results;
 
         Ok(deduped_results)
     }

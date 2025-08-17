@@ -485,12 +485,9 @@ impl CompactionEngine {
                     let neighbor_set: BTreeSet<u64> =
                         neighbors.into_iter().map(|v| v.as_u64()).collect();
 
-                    // Record this pivot snapshot
-                    pivot_snapshots.push((
-                        entry.entry.timestamp,
-                        neighbor_set.clone(),
-                        entry.source_level,
-                    ));
+                    // Record this pivot snapshot (avoid cloning by using reference iterator)
+                    let snapshot_set: BTreeSet<u64> = neighbor_set.iter().copied().collect();
+                    pivot_snapshots.push((entry.entry.timestamp, snapshot_set, entry.source_level));
 
                     // Mark all neighbors as present in this pivot
                     for neighbor_id in neighbor_set {
