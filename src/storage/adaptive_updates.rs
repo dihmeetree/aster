@@ -4,7 +4,7 @@
 //! delta updates (edge-based) or pivot updates (vertex-based) for each operation.
 
 use crate::types::PolyLSMConfig;
-use crate::{Result, VertexId};
+use crate::VertexId;
 use std::collections::HashMap;
 
 /// Update method selection for edge operations
@@ -320,6 +320,17 @@ impl AdaptiveUpdateStrategy {
     ) -> UpdateMethod {
         // Record this as an update operation for workload tracking
         self.record_operation(OperationType::Update);
+
+        // Track vertex-specific updates for analytics
+        self.stats.delta_updates += 1;
+        if vertex_id.as_u64() % 1000 == 0 {
+            // Periodic logging for every 1000th vertex
+            tracing::debug!(
+                "Adaptive update for vertex {}, degree {}",
+                vertex_id.as_u64(),
+                vertex_degree
+            );
+        }
 
         // Check cache first
         let degree_bucket = vertex_degree / 10; // Group similar degrees

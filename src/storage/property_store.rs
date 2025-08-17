@@ -6,7 +6,7 @@
 //! - Schema inference and validation
 //! - Compression for property values
 
-use crate::storage::{EntryType, MemTable, MemTableEntry, SSTableReader, SSTableWriter};
+use crate::storage::{MemTable, MemTableEntry};
 use crate::types::Properties;
 use crate::utils::bloom_filter::BloomFilter;
 use crate::utils::fast_serialization::{FastSerialize, FastSerializeBuffer};
@@ -57,8 +57,6 @@ impl FastSerialize for PropertyEntry {
     }
 
     fn deserialize_fast(reader: &mut dyn std::io::Read) -> Result<Self> {
-        use std::io::Read;
-
         // Read entry type
         let mut type_bytes = [0u8; 1];
         reader.read_exact(&mut type_bytes)?;
@@ -240,7 +238,10 @@ impl PropertyIndex {
         let mut result = Vec::new();
 
         for (value, entities) in self.value_to_entities.range(min..=max) {
-            result.extend(entities.iter().copied());
+            // Validate that the value is actually in range (safety check)
+            if value >= min && value <= max {
+                result.extend(entities.iter().copied());
+            }
         }
 
         result

@@ -17,7 +17,6 @@ use crate::{AsterError, Result, Timestamp, VertexId};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -500,7 +499,14 @@ impl SSTableReader {
         file.seek(SeekFrom::Start(metadata.index_offset))?;
         let mut index_header_bytes = vec![0u8; BlockHeader::SIZE];
         file.read_exact(&mut index_header_bytes)?;
-        let _index_header = BlockHeader::deserialize(&index_header_bytes)?;
+        let index_header = BlockHeader::deserialize(&index_header_bytes)?;
+
+        // Validate index header
+        if index_header.checksum == 0 {
+            return Err(AsterError::storage(
+                "Invalid index header: checksum is zero",
+            ));
+        }
 
         let mut index_data = vec![0u8; metadata.index_size as usize - BlockHeader::SIZE];
         file.read_exact(&mut index_data)?;
@@ -511,7 +517,14 @@ impl SSTableReader {
             file.seek(SeekFrom::Start(metadata.bloom_offset))?;
             let mut bloom_header_bytes = vec![0u8; BlockHeader::SIZE];
             file.read_exact(&mut bloom_header_bytes)?;
-            let _bloom_header = BlockHeader::deserialize(&bloom_header_bytes)?;
+            let bloom_header = BlockHeader::deserialize(&bloom_header_bytes)?;
+
+            // Validate bloom filter header
+            if bloom_header.checksum == 0 {
+                return Err(AsterError::storage(
+                    "Invalid bloom filter header: checksum is zero",
+                ));
+            }
 
             let mut bloom_data = vec![0u8; metadata.bloom_size as usize - BlockHeader::SIZE];
             file.read_exact(&mut bloom_data)?;

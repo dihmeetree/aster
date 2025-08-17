@@ -9,10 +9,7 @@ use crate::storage::{
 };
 use crate::types::PolyLSMConfig;
 use crate::utils::{
-    encoding::{
-        add_edge_deletion_markers, decode_neighbors, encode_neighbors, get_active_neighbors,
-        merge_encoded_neighbors,
-    },
+    encoding::{add_edge_deletion_markers, encode_neighbors, get_active_neighbors},
     DegreeSketch,
 };
 use crate::{AsterError, Result, Timestamp, VertexId};
@@ -442,6 +439,14 @@ impl PolyLSM {
         let sstable_path = self.data_dir.join(format!("{:08}.sst", sstable_id));
 
         let stats = memtable.stats();
+
+        // Log memtable stats before flushing
+        tracing::info!(
+            "Flushing memtable with {} vertices, {} bytes",
+            stats.num_vertices,
+            stats.size_bytes
+        );
+
         let sstable_config = SSTableConfig {
             block_size: self.config.block_size as usize,
             compression_enabled: self.config.compression_enabled,
@@ -989,6 +994,20 @@ impl PolyLSM {
             self.maybe_flush_memtables().await?;
         }
 
+        Ok(())
+    }
+
+    /// Ensure a vertex exists in the storage system by initializing it in the degree sketch
+    /// This is used for isolated vertices that have no edges
+    pub async fn ensure_vertex_exists(&self, vertex_id: VertexId) -> Result<()> {
+        // Add vertex to degree sketch to ensure it's tracked
+        {
+            let mut sketch = self.degree_sketch.write();
+            sketch.ensure_vertex_tracked(vertex_id.as_u64());
+        }
+
+        // The vertex is now considered to exist in the system
+        // even if it has no edges yet
         Ok(())
     }
 

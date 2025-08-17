@@ -8,19 +8,14 @@
 //! - Historical data collection
 //! - Prometheus-compatible metric export
 
-use crate::query::QueryStats;
 use crate::recovery::RecoveryStats;
 use crate::storage::{
-    adaptive_updates::AdaptiveStats,
-    block_cache::CacheStats,
-    compaction::CompactionStats,
-    memtable::MemTableStats,
-    poly_lsm::{LevelStats, PolyLSMStats},
-    property_store::PropertyStoreStats,
+    adaptive_updates::AdaptiveStats, block_cache::CacheStats, compaction::CompactionStats,
+    memtable::MemTableStats, poly_lsm::PolyLSMStats, property_store::PropertyStoreStats,
     storage_manager::StorageStats,
 };
 use crate::transaction::TransactionManagerStats;
-use crate::{Result, Timestamp};
+use crate::Result;
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};

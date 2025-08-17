@@ -8,14 +8,13 @@
 
 use crate::storage::{EntryType, MemTableEntry, SSTableConfig, SSTableReader, SSTableWriter};
 use crate::utils::encoding::{
-    decode_neighbors, decode_neighbors_adaptive, encode_neighbors, encode_neighbors_adaptive,
-    get_encoding_stats,
+    decode_neighbors_adaptive, encode_neighbors_adaptive, get_encoding_stats,
 };
-use crate::{AsterError, Result, Timestamp, VertexId};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use crate::{Result, Timestamp, VertexId};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Compaction strategy selection
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -529,9 +528,6 @@ impl CompactionEngine {
             .into_iter()
             .map(VertexId::from_u64)
             .collect();
-
-        // Use adaptive encoding for better compression
-        let encoded_data = encode_neighbors_adaptive(&neighbors_vec)?;
 
         // Enhanced decision logic for entry type
         let entry = self.decide_entry_type(&neighbors_vec, &neighbor_state, latest_timestamp);

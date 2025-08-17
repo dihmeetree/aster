@@ -4,7 +4,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::benchmarks::{BenchmarkMetrics, WorkloadType};
-use crate::error::{AsterError, Result};
+use crate::error::Result;
 use crate::graph::Graph;
 use crate::storage::poly_lsm::PolyLSM;
 use crate::types::VertexId;
@@ -432,7 +432,7 @@ impl BenchmarkSuite {
 
         // Focus on 10% of vertices for high contention
         let hot_vertex_count = self.config.vertex_count / 10;
-        let mut rng_state = 97531u64;
+        let rng_state = 97531u64;
 
         // Run concurrent operations using simple loop instead of spawning tasks
         // This avoids the Send requirement issues
@@ -473,6 +473,14 @@ impl BenchmarkSuite {
                         }
                         Err(_) => metrics.failed_reads += 1,
                     }
+                }
+            }
+
+            // Track peak memory usage periodically
+            if task_id % 100 == 0 {
+                if self.config.measure_memory {
+                    let current_memory = self.get_current_memory_usage_mb();
+                    *peak_memory_mb = peak_memory_mb.max(current_memory);
                 }
             }
         }
@@ -569,6 +577,12 @@ impl BenchmarkSuite {
 
             metrics.total_write_time += batch_start.elapsed();
             info!("Bulk load batch {}/{} completed", batch + 1, num_batches);
+
+            // Track peak memory usage per batch
+            if self.config.measure_memory {
+                let current_memory = self.get_current_memory_usage_mb();
+                *peak_memory_mb = peak_memory_mb.max(current_memory);
+            }
         }
 
         Ok(())

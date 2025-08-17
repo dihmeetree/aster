@@ -232,7 +232,7 @@ impl PartitionedEliasFano {
     }
 
     /// Find optimal segment boundary to minimize compression overhead
-    fn find_optimal_boundary(vertex_ids: &[u64], start: usize, suggested_end: usize) -> usize {
+    fn find_optimal_boundary(vertex_ids: &[u64], _start: usize, suggested_end: usize) -> usize {
         if suggested_end >= vertex_ids.len() {
             return vertex_ids.len();
         }
@@ -379,11 +379,6 @@ impl PartitionedEliasFano {
             std::cmp::min(total_bits / 2, 16)
         };
 
-        let high_mask = if low_bits_per_value >= 64 {
-            0
-        } else {
-            !((1u64 << low_bits_per_value) - 1)
-        };
         let low_mask = if low_bits_per_value >= 64 {
             !0
         } else {

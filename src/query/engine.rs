@@ -10,7 +10,7 @@
 use crate::graph::Graph;
 use crate::storage::PropertyStore;
 use crate::transaction::Transaction;
-use crate::{AsterError, EdgeId, Properties, PropertyValue, Result, VertexId};
+use crate::{AsterError, EdgeId, PropertyValue, Result, VertexId};
 use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
@@ -1177,7 +1177,18 @@ impl QueryEngine {
         let mut result = QueryResultSet::new();
         result.total_vertices = vertices.len();
 
+        // Check timeout if specified
+        let start_time = std::time::Instant::now();
+
         for vertex in vertices {
+            // Check timeout periodically during processing
+            if let Some(timeout_ms) = context.timeout_ms {
+                if start_time.elapsed().as_millis() > timeout_ms as u128 {
+                    return Err(crate::AsterError::invalid_operation(
+                        "Query timeout during vertex projection",
+                    ));
+                }
+            }
             let mut row = HashMap::new();
 
             for projection in projections {
@@ -1242,7 +1253,18 @@ impl QueryEngine {
     ) -> Result<HashMap<String, PropertyValue>> {
         let mut results = HashMap::new();
 
+        // Check timeout if specified
+        let start_time = std::time::Instant::now();
+
         for aggregation in aggregations {
+            // Check timeout periodically during processing
+            if let Some(timeout_ms) = context.timeout_ms {
+                if start_time.elapsed().as_millis() > timeout_ms as u128 {
+                    return Err(crate::AsterError::invalid_operation(
+                        "Query timeout during aggregation",
+                    ));
+                }
+            }
             match aggregation {
                 AggregationFunction::Count => {
                     results.insert(

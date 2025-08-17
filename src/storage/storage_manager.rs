@@ -7,10 +7,10 @@
 //! - Performance monitoring and statistics
 //! - Background maintenance tasks
 
-use super::block_cache::{BlockCache, BlockCacheConfig};
-use super::memtable::{MemTable, MemTableEntry};
+use super::block_cache::BlockCache;
+use super::memtable::MemTableEntry;
 use super::sstable::{SSTableConfig, SSTableReader, SSTableWriter};
-use crate::{AsterError, Result, VertexId};
+use crate::{Result, VertexId};
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;

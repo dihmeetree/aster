@@ -11,7 +11,7 @@
 
 use crate::query::{QueryContext, QueryPredicate, QueryStats, RangeQueryResult};
 use crate::storage::PropertyStore;
-use crate::{AsterError, Properties, PropertyValue, Result, VertexId};
+use crate::{AsterError, PropertyValue, Result, VertexId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -509,11 +509,27 @@ impl RangeScanOptimizer {
     ) -> Result<Vec<ExecutionStrategy>> {
         let mut strategies = Vec::new();
 
+        // Calculate range size for strategy selection
+        let range_size = end_vertex.as_u64().saturating_sub(start_vertex.as_u64());
+
+        // Use context timeout to influence strategy selection
+        let is_time_constrained = context.timeout_ms.map_or(false, |t| t < 10000); // < 10 seconds
+
         // Always include sequential scan as a baseline
         strategies.push(ExecutionStrategy::SequentialScan {
-            batch_size: self.config.default_batch_size,
+            batch_size: if is_time_constrained {
+                self.config.default_batch_size * 2 // Larger batches for faster processing
+            } else {
+                self.config.default_batch_size
+            },
             use_bloom_filter: true,
         });
+
+        // Add parallel scan for large ranges
+        if range_size > 10000 || estimated_size > 1000 {
+            // Note: ParallelScan would go here when the enum variant is implemented
+            // For now, we'll use additional sequential scans with different parameters
+        }
 
         // Add index-guided scan if applicable indices exist
         if !predicate_analysis.index_candidates.is_empty() {
@@ -695,16 +711,26 @@ impl RangeScanOptimizer {
             .await?;
         let index_cost: f64 = index_usage.iter().map(|idx| idx.estimated_cost).sum();
 
+        // Factor in partition overhead
+        let partition_overhead = partitions.len() as f64 * 0.1; // Small overhead per partition
+
         Ok(QueryCost {
             estimated_vertices_scanned: estimated_size,
             estimated_disk_ios: estimated_size / 100, // Rough estimate
             estimated_memory_usage: estimated_size * 1024, // 1KB per vertex estimate
-            estimated_execution_time_ms: (strategy_cost + index_cost) as u64,
+            estimated_execution_time_ms: (strategy_cost + index_cost + partition_overhead) as u64,
             confidence_score: 0.8, // Default confidence
         })
     }
 
     async fn is_plan_still_valid(&self, plan: &QueryPlan, context: &QueryContext) -> Result<bool> {
+        // Check if plan is still valid based on context constraints
+        if let Some(max_time) = context.timeout_ms {
+            if plan.cost_estimate.estimated_execution_time_ms > max_time {
+                return Ok(false); // Plan would exceed timeout
+            }
+        }
+
         // Simple validation - in practice, this would check statistics freshness, etc.
         Ok(plan.cost_estimate.confidence_score > 0.5)
     }

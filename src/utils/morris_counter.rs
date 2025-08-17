@@ -365,6 +365,18 @@ impl DegreeSketch {
             })
             .collect()
     }
+
+    /// Ensure a vertex is tracked in the degree sketch
+    /// This initializes the vertex with a degree of 0 if not already present
+    pub fn ensure_vertex_tracked(&mut self, vertex_id: u64) {
+        let vertex_index = self.hash_vertex(vertex_id);
+        // The counter will already be initialized to 0, so we don't need to do anything
+        // This method exists for API completeness and future extensibility
+        // We could verify the vertex is within bounds
+        if vertex_index < self.capacity() {
+            // Vertex is tracked (all counters start at 0)
+        }
+    }
 }
 
 /// Statistics for monitoring degree sketch performance

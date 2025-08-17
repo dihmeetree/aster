@@ -282,10 +282,10 @@ impl AsterDB {
 
     /// Begin a new transaction
     pub async fn begin_transaction(&self) -> Result<Transaction> {
-        let mut tx = self.transaction_manager.begin()?;
+        let tx = self.transaction_manager.begin()?;
 
         // Log transaction start for recovery if enabled
-        if let Some(ref recovery) = self.recovery_manager {
+        if let Some(ref _recovery) = self.recovery_manager {
             // Transaction start logging would be handled by the transaction itself
             // through hooks in commit/rollback operations
         }
@@ -294,7 +294,7 @@ impl AsterDB {
     }
 
     /// Commit a transaction with recovery logging
-    pub async fn commit_transaction(&self, mut transaction: Transaction) -> Result<()> {
+    pub async fn commit_transaction(&self, transaction: Transaction) -> Result<()> {
         let start_time = std::time::Instant::now();
 
         // Get transaction changes before committing
@@ -325,7 +325,7 @@ impl AsterDB {
     }
 
     /// Rollback a transaction with recovery logging
-    pub async fn rollback_transaction(&self, mut transaction: Transaction) -> Result<()> {
+    pub async fn rollback_transaction(&self, transaction: Transaction) -> Result<()> {
         let start_time = std::time::Instant::now();
         let tx_id = transaction.id();
 

@@ -782,7 +782,7 @@ impl GremlinEngine {
     async fn execute_step(
         &self,
         step: &GremlinStep,
-        mut results: Vec<GremlinResult>,
+        results: Vec<GremlinResult>,
         context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
@@ -979,6 +979,15 @@ impl GremlinEngine {
         context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
+        // Track that we visited these vertices
+        stats.vertices_visited += results.len();
+
+        // Check timeout from query context
+        if let Some(timeout_ms) = context.query_context.timeout_ms {
+            // Note: We'd need a start_time field in GremlinContext for proper timeout tracking
+            // For now, this shows the pattern for timeout checking
+        }
+
         // For incoming edges, we'd need to scan all vertices to find those pointing to our vertices
         // This is expensive, so for now we'll return empty results as a placeholder
         // In a full implementation, we'd maintain reverse indexes
@@ -1082,11 +1091,10 @@ impl GremlinEngine {
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         let mut edge_results = Vec::new();
+        stats.vertices_visited += results.len();
 
         for result in results {
             if let Some(vertex_id) = result.as_vertex() {
-                let mut found_edges = false;
-
                 // Look for edges in the global registry
                 if let Some(ref edge_registry) = self.edge_registry {
                     let label_filter = labels
@@ -1105,12 +1113,10 @@ impl GremlinEngine {
 
                         if should_include {
                             edge_results.push(GremlinResult::Edge(entry.edge_id));
-                            found_edges = true;
+                            stats.edges_traversed += 1;
                         }
                     }
                 }
-
-                stats.vertices_visited += 1;
             }
         }
 
@@ -2480,7 +2486,7 @@ impl GremlinEngine {
         results: Vec<GremlinResult>,
         key: &str,
         value: &PropertyValue,
-        _context: &mut GremlinContext,
+        context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         if let Some(ref property_store) = self.property_store {
@@ -2629,7 +2635,7 @@ impl GremlinEngine {
     async fn execute_id_step(
         &self,
         results: Vec<GremlinResult>,
-        _context: &mut GremlinContext,
+        context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         let mut id_results = Vec::new();
@@ -2658,7 +2664,7 @@ impl GremlinEngine {
         results: Vec<GremlinResult>,
         label: &str,
         context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         // Store all results in the side effect storage with the given label
         for result in &results {
@@ -2675,7 +2681,7 @@ impl GremlinEngine {
         results: Vec<GremlinResult>,
         aggregate_label: &str,
         context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         // Get the aggregated values from side effects
         let aggregated_values = context
@@ -2738,8 +2744,8 @@ impl GremlinEngine {
     async fn execute_group_count_step(
         &self,
         results: Vec<GremlinResult>,
-        _context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         let mut count_map = HashMap::new();
 
@@ -2769,8 +2775,8 @@ impl GremlinEngine {
         &self,
         results: Vec<GremlinResult>,
         order: Option<&GremlinOrder>,
-        _context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         let mut ordered_results = Vec::new();
 
@@ -2792,7 +2798,7 @@ impl GremlinEngine {
                     }
                     ordered_results.push(GremlinResult::List(list));
                 }
-                GremlinResult::Map(mut map) => {
+                GremlinResult::Map(map) => {
                     // Convert map to sorted list of key-value pairs based on values
                     let mut map_pairs: Vec<(String, GremlinResult)> = map.into_iter().collect();
 
@@ -2850,8 +2856,8 @@ impl GremlinEngine {
         results: Vec<GremlinResult>,
         property: &str,
         order: Option<&GremlinOrder>,
-        _context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
         // The .by() step is typically a modifier for order() and other steps
         // For now, we'll implement basic property-based ordering

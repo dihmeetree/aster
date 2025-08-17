@@ -9,7 +9,7 @@
 
 use aster_db::{
     AsterDB, AsterDBConfig, LockResource, Properties, PropertyValue, Timestamp, Transaction,
-    TransactionManager, VertexId,
+    VertexId,
 };
 use tempfile::TempDir;
 

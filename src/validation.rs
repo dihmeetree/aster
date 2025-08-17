@@ -9,7 +9,7 @@
 
 use crate::storage::adaptive_updates::CostModel;
 use crate::types::PolyLSMConfig;
-use crate::{Result, VertexId};
+use crate::Result;
 use std::collections::HashMap;
 
 /// Comprehensive cost model validation suite

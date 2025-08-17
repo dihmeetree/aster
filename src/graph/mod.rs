@@ -1,8 +1,7 @@
 //! Graph database layer built on top of Poly-LSM storage
 
 use crate::storage::PolyLSM;
-use crate::{AsterError, EdgeId, Properties, PropertyValue, Result, Timestamp, VertexId};
-use serde::{Deserialize, Serialize};
+use crate::{EdgeId, Properties, Result, VertexId};
 use std::sync::Arc;
 
 pub mod edge;
@@ -99,10 +98,15 @@ impl Graph {
     pub async fn add_vertex(
         &self,
         vertex_id: VertexId,
-        properties: Option<Properties>,
+        _properties: Option<Properties>,
     ) -> Result<()> {
-        // This ensures the vertex exists in storage by adding a self-edge or similar marker
-        // For now we'll just use the storage layer's vertex tracking
+        // Ensure the vertex exists in storage by checking/creating it
+        // For isolated vertices, we need to ensure they're tracked in the degree sketch
+        if !self.storage.contains_vertex(vertex_id).await? {
+            // Initialize the vertex by adding it to the degree sketch
+            // This creates an empty neighbor list for the vertex
+            self.storage.ensure_vertex_exists(vertex_id).await?;
+        }
         Ok(())
     }
 }

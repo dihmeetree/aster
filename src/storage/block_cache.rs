@@ -7,7 +7,7 @@
 //! - Statistics tracking for cache performance analysis
 //! - Thread-safe concurrent access
 
-use crate::{AsterError, Result, VertexId};
+use crate::Result;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

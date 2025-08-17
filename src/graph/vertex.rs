@@ -2,7 +2,6 @@
 
 use crate::{Properties, PropertyValue, VertexId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// A vertex in the graph
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
