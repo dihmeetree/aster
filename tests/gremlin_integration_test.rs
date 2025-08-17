@@ -10,8 +10,7 @@
 
 use aster_db::query::GremlinPredicate;
 use aster_db::{
-    AsterDB, AsterDBConfig, GremlinContext, GremlinResultSet, GremlinTraversal, Properties,
-    PropertyValue, QueryContext, VertexId,
+    AsterDB, AsterDBConfig, GremlinContext, Properties, PropertyValue, QueryContext, VertexId,
 };
 use tempfile::TempDir;
 

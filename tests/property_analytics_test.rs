@@ -6,7 +6,7 @@
 //! - Property indexing for high-performance searches
 //! - Multi-dimensional analysis of graph data
 
-use aster_db::{AsterDB, AsterDBConfig, Properties, PropertyValue, Result, VertexId};
+use aster_db::{AsterDB, AsterDBConfig, PropertyValue, Result, VertexId};
 use std::collections::HashMap;
 use tempfile::TempDir;
 

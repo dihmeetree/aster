@@ -7,10 +7,7 @@
 //! - Transactional storage operations with proper versioning
 //! - Commit timestamp ordering and validation
 
-use aster_db::{
-    AsterDB, AsterDBConfig, LockResource, Properties, PropertyValue, Timestamp, Transaction,
-    VertexId,
-};
+use aster_db::{AsterDB, AsterDBConfig, LockResource, Properties, PropertyValue, VertexId};
 use tempfile::TempDir;
 
 #[tokio::test]
