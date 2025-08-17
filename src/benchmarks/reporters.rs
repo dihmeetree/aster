@@ -4,6 +4,26 @@ use std::io::{self, Write};
 
 use crate::benchmarks::{BenchmarkResults, BenchmarkSummary};
 
+/// Format number with commas for better readability
+fn format_number(num: u64) -> String {
+    if num < 1000 {
+        return num.to_string();
+    }
+
+    let mut formatted = String::new();
+    let s = num.to_string();
+    let chars: Vec<char> = s.chars().collect();
+
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(c);
+    }
+
+    formatted
+}
+
 /// Formats for benchmark result output
 #[derive(Debug, Clone)]
 pub enum OutputFormat {
@@ -631,69 +651,718 @@ impl BenchmarkReporter {
         writer: &mut W,
     ) -> io::Result<()> {
         writeln!(writer, "<!DOCTYPE html>")?;
+        writeln!(writer, "<html lang=\"en\">")?;
+        writeln!(writer, "<head>")?;
+        writeln!(writer, "    <meta charset=\"UTF-8\">")?;
         writeln!(
             writer,
-            "<html><head><title>Aster Database Benchmark Report</title>"
+            "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
         )?;
-        writeln!(writer, "<style>")?;
+        writeln!(writer, "    <title>Aster Database Benchmark Report</title>")?;
         writeln!(
             writer,
-            "body {{ font-family: Arial, sans-serif; margin: 20px; }}"
+            "    <script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>"
         )?;
-        writeln!(
-            writer,
-            "table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}"
-        )?;
-        writeln!(
-            writer,
-            "th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}"
-        )?;
-        writeln!(writer, "th {{ background-color: #f2f2f2; }}")?;
-        writeln!(writer, ".metric {{ font-weight: bold; color: #333; }}")?;
-        writeln!(writer, ".good {{ color: green; }}")?;
-        writeln!(writer, ".warning {{ color: orange; }}")?;
-        writeln!(writer, ".error {{ color: red; }}")?;
-        writeln!(writer, "</style></head><body>")?;
+        writeln!(writer, "    <style>")?;
 
-        writeln!(writer, "<h1>Aster Database Benchmark Report</h1>")?;
+        // Enhanced CSS styling
+        writeln!(writer, "        :root {{")?;
+        writeln!(writer, "            --primary-color: #2563eb;")?;
+        writeln!(writer, "            --secondary-color: #64748b;")?;
+        writeln!(writer, "            --success-color: #10b981;")?;
+        writeln!(writer, "            --warning-color: #f59e0b;")?;
+        writeln!(writer, "            --error-color: #ef4444;")?;
+        writeln!(writer, "            --bg-color: #f8fafc;")?;
+        writeln!(writer, "            --card-bg: #ffffff;")?;
+        writeln!(writer, "            --border-color: #e2e8f0;")?;
+        writeln!(writer, "            --text-color: #1e293b;")?;
+        writeln!(writer, "            --text-secondary: #64748b;")?;
+        writeln!(writer, "        }}")?;
+
         writeln!(
             writer,
-            "<p>Generated: {}</p>",
-            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            "        * {{ box-sizing: border-box; margin: 0; padding: 0; }}"
+        )?;
+        writeln!(writer, "        body {{")?;
+        writeln!(writer, "            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;")?;
+        writeln!(writer, "            line-height: 1.6;")?;
+        writeln!(writer, "            color: var(--text-color);")?;
+        writeln!(writer, "            background-color: var(--bg-color);")?;
+        writeln!(writer, "            padding: 20px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .container {{")?;
+        writeln!(writer, "            max-width: 1200px;")?;
+        writeln!(writer, "            margin: 0 auto;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .header {{")?;
+        writeln!(
+            writer,
+            "            background: linear-gradient(135deg, var(--primary-color), #1d4ed8);"
+        )?;
+        writeln!(writer, "            color: white;")?;
+        writeln!(writer, "            padding: 40px;")?;
+        writeln!(writer, "            border-radius: 16px;")?;
+        writeln!(writer, "            margin-bottom: 30px;")?;
+        writeln!(
+            writer,
+            "            box-shadow: 0 10px 25px rgba(37, 99, 235, 0.2);"
+        )?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .header h1 {{")?;
+        writeln!(writer, "            font-size: 2.5rem;")?;
+        writeln!(writer, "            font-weight: 700;")?;
+        writeln!(writer, "            margin-bottom: 10px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .header p {{")?;
+        writeln!(writer, "            font-size: 1.1rem;")?;
+        writeln!(writer, "            opacity: 0.9;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .metrics-grid {{")?;
+        writeln!(writer, "            display: grid;")?;
+        writeln!(
+            writer,
+            "            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));"
+        )?;
+        writeln!(writer, "            gap: 20px;")?;
+        writeln!(writer, "            margin-bottom: 30px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .card {{")?;
+        writeln!(writer, "            background: var(--card-bg);")?;
+        writeln!(writer, "            border-radius: 12px;")?;
+        writeln!(writer, "            padding: 24px;")?;
+        writeln!(
+            writer,
+            "            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);"
+        )?;
+        writeln!(writer, "            border: 1px solid var(--border-color);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .card h3 {{")?;
+        writeln!(writer, "            font-size: 1.25rem;")?;
+        writeln!(writer, "            font-weight: 600;")?;
+        writeln!(writer, "            margin-bottom: 16px;")?;
+        writeln!(writer, "            color: var(--text-color);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .metric-value {{")?;
+        writeln!(writer, "            font-size: 2rem;")?;
+        writeln!(writer, "            font-weight: 700;")?;
+        writeln!(writer, "            margin-bottom: 8px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .metric-label {{")?;
+        writeln!(writer, "            font-size: 0.875rem;")?;
+        writeln!(writer, "            color: var(--text-secondary);")?;
+        writeln!(writer, "            text-transform: uppercase;")?;
+        writeln!(writer, "            font-weight: 500;")?;
+        writeln!(writer, "            letter-spacing: 0.5px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .performance-table {{")?;
+        writeln!(writer, "            width: 100%;")?;
+        writeln!(writer, "            border-collapse: collapse;")?;
+        writeln!(writer, "            background: var(--card-bg);")?;
+        writeln!(writer, "            border-radius: 12px;")?;
+        writeln!(writer, "            overflow: hidden;")?;
+        writeln!(
+            writer,
+            "            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);"
+        )?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .performance-table th {{")?;
+        writeln!(writer, "            background: var(--primary-color);")?;
+        writeln!(writer, "            color: white;")?;
+        writeln!(writer, "            padding: 16px;")?;
+        writeln!(writer, "            text-align: left;")?;
+        writeln!(writer, "            font-weight: 600;")?;
+        writeln!(writer, "            font-size: 0.875rem;")?;
+        writeln!(writer, "            text-transform: uppercase;")?;
+        writeln!(writer, "            letter-spacing: 0.5px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .performance-table td {{")?;
+        writeln!(writer, "            padding: 16px;")?;
+        writeln!(
+            writer,
+            "            border-bottom: 1px solid var(--border-color);"
+        )?;
+        writeln!(writer, "            font-size: 0.95rem;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .performance-table tr:hover {{")?;
+        writeln!(writer, "            background-color: #f8fafc;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(
+            writer,
+            "        .status-good {{ color: var(--success-color); font-weight: 600; }}"
+        )?;
+        writeln!(
+            writer,
+            "        .status-warning {{ color: var(--warning-color); font-weight: 600; }}"
+        )?;
+        writeln!(
+            writer,
+            "        .status-error {{ color: var(--error-color); font-weight: 600; }}"
         )?;
 
-        writeln!(writer, "<h2>Performance Summary</h2>")?;
-        writeln!(writer, "<table>")?;
-        writeln!(writer, "<tr><th>Workload</th><th>Ops/sec</th><th>Avg Latency (ms)</th><th>P95 Latency (ms)</th><th>Success Rate</th><th>Error Rate</th></tr>")?;
+        writeln!(writer, "        .chart-container {{")?;
+        writeln!(writer, "            position: relative;")?;
+        writeln!(writer, "            height: 400px;")?;
+        writeln!(writer, "            margin: 20px 0;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .section {{")?;
+        writeln!(writer, "            margin-bottom: 40px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .section h2 {{")?;
+        writeln!(writer, "            font-size: 1.75rem;")?;
+        writeln!(writer, "            font-weight: 600;")?;
+        writeln!(writer, "            margin-bottom: 20px;")?;
+        writeln!(writer, "            color: var(--text-color);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .badge {{")?;
+        writeln!(writer, "            display: inline-block;")?;
+        writeln!(writer, "            padding: 4px 12px;")?;
+        writeln!(writer, "            border-radius: 20px;")?;
+        writeln!(writer, "            font-size: 0.75rem;")?;
+        writeln!(writer, "            font-weight: 600;")?;
+        writeln!(writer, "            text-transform: uppercase;")?;
+        writeln!(writer, "            letter-spacing: 0.5px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .badge-success {{")?;
+        writeln!(
+            writer,
+            "            background-color: rgba(16, 185, 129, 0.1);"
+        )?;
+        writeln!(writer, "            color: var(--success-color);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .badge-warning {{")?;
+        writeln!(
+            writer,
+            "            background-color: rgba(245, 158, 11, 0.1);"
+        )?;
+        writeln!(writer, "            color: var(--warning-color);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .disabled-pill {{")?;
+        writeln!(writer, "            display: inline-block;")?;
+        writeln!(writer, "            padding: 8px 16px;")?;
+        writeln!(
+            writer,
+            "            background-color: rgba(239, 68, 68, 0.1);"
+        )?;
+        writeln!(writer, "            color: var(--error-color);")?;
+        writeln!(
+            writer,
+            "            border: 1px solid rgba(239, 68, 68, 0.3);"
+        )?;
+        writeln!(writer, "            border-radius: 20px;")?;
+        writeln!(writer, "            font-size: 0.9rem;")?;
+        writeln!(writer, "            font-weight: 600;")?;
+        writeln!(writer, "            text-transform: uppercase;")?;
+        writeln!(writer, "            letter-spacing: 0.5px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .disabled-section {{")?;
+        writeln!(writer, "            display: flex;")?;
+        writeln!(writer, "            align-items: center;")?;
+        writeln!(writer, "            justify-content: center;")?;
+        writeln!(writer, "            min-height: 200px;")?;
+        writeln!(
+            writer,
+            "            background-color: rgba(254, 242, 242, 0.8);"
+        )?;
+        writeln!(writer, "            border-radius: 8px;")?;
+        writeln!(
+            writer,
+            "            border: 2px dashed rgba(239, 68, 68, 0.3);"
+        )?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .disabled-message {{")?;
+        writeln!(writer, "            text-align: center;")?;
+        writeln!(writer, "            color: var(--text-secondary);")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .disabled-message p {{")?;
+        writeln!(writer, "            margin-top: 12px;")?;
+        writeln!(writer, "            font-size: 0.9rem;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .disabled-message code {{")?;
+        writeln!(
+            writer,
+            "            background-color: rgba(100, 116, 139, 0.1);"
+        )?;
+        writeln!(writer, "            padding: 2px 6px;")?;
+        writeln!(writer, "            border-radius: 4px;")?;
+        writeln!(
+            writer,
+            "            font-family: 'Monaco', 'Consolas', monospace;"
+        )?;
+        writeln!(writer, "            font-size: 0.85rem;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        .recommendations {{")?;
+        writeln!(
+            writer,
+            "            background: linear-gradient(135deg, #f0fdf4, #ecfdf5);"
+        )?;
+        writeln!(
+            writer,
+            "            border-left: 4px solid var(--success-color);"
+        )?;
+        writeln!(writer, "            padding: 20px;")?;
+        writeln!(writer, "            border-radius: 8px;")?;
+        writeln!(writer, "            margin-top: 30px;")?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "        @media (max-width: 768px) {{")?;
+        writeln!(writer, "            .container {{ padding: 10px; }}")?;
+        writeln!(writer, "            .header {{ padding: 20px; }}")?;
+        writeln!(writer, "            .header h1 {{ font-size: 2rem; }}")?;
+        writeln!(
+            writer,
+            "            .metrics-grid {{ grid-template-columns: 1fr; }}"
+        )?;
+        writeln!(
+            writer,
+            "            .performance-table {{ font-size: 0.8rem; }}"
+        )?;
+        writeln!(
+            writer,
+            "            .performance-table th, .performance-table td {{ padding: 8px; }}"
+        )?;
+        writeln!(writer, "        }}")?;
+
+        writeln!(writer, "    </style>")?;
+        writeln!(writer, "</head>")?;
+        writeln!(writer, "<body>")?;
+        writeln!(writer, "    <div class=\"container\">")?;
+
+        // Header section
+        writeln!(writer, "        <div class=\"header\">")?;
+        writeln!(
+            writer,
+            "            <h1>🚀 Aster Database Benchmark Report</h1>"
+        )?;
+        writeln!(
+            writer,
+            "            <p>Generated on {} | {} workload{} analyzed</p>",
+            Utc::now().format("%B %d, %Y at %H:%M:%S UTC"),
+            results.len(),
+            if results.len() == 1 { "" } else { "s" }
+        )?;
+        writeln!(writer, "        </div>")?;
+
+        // Key metrics overview
+        let total_ops: u64 = results.iter().map(|r| r.metrics.total_operations()).sum();
+        let avg_throughput: f64 = results
+            .iter()
+            .map(|r| r.metrics.operations_per_second)
+            .sum::<f64>()
+            / results.len() as f64;
+        let avg_success_rate: f64 = results
+            .iter()
+            .map(|r| r.metrics.success_rate())
+            .sum::<f64>()
+            / results.len() as f64;
+        let peak_memory: f64 = results
+            .iter()
+            .map(|r| r.memory_stats.peak_memory_mb)
+            .fold(0.0, f64::max);
+
+        writeln!(writer, "        <div class=\"metrics-grid\">")?;
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>📊 Total Operations</h3>")?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-value\">{}</div>",
+            format_number(total_ops)
+        )?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-label\">Operations Executed</div>"
+        )?;
+        writeln!(writer, "            </div>")?;
+
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>⚡ Average Throughput</h3>")?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-value\">{}</div>",
+            format_number(avg_throughput as u64)
+        )?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-label\">Operations per Second</div>"
+        )?;
+        writeln!(writer, "            </div>")?;
+
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>✅ Success Rate</h3>")?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-value status-good\">{:.1}%</div>",
+            avg_success_rate * 100.0
+        )?;
+        writeln!(
+            writer,
+            "                <div class=\"metric-label\">Successful Operations</div>"
+        )?;
+        writeln!(writer, "            </div>")?;
+
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>💾 Peak Memory</h3>")?;
+        if peak_memory > 0.0 {
+            writeln!(
+                writer,
+                "                <div class=\"metric-value\">{:.1} MB</div>",
+                peak_memory
+            )?;
+            writeln!(
+                writer,
+                "                <div class=\"metric-label\">Memory Usage</div>"
+            )?;
+        } else {
+            writeln!(writer, "                <div class=\"metric-value\"><span class=\"disabled-pill\">Disabled</span></div>")?;
+            writeln!(
+                writer,
+                "                <div class=\"metric-label\">Use --memory-analysis to enable</div>"
+            )?;
+        }
+        writeln!(writer, "            </div>")?;
+        writeln!(writer, "        </div>")?;
+
+        // Performance summary table
+        writeln!(writer, "        <div class=\"section\">")?;
+        writeln!(writer, "            <h2>📈 Performance Summary</h2>")?;
+        writeln!(writer, "            <table class=\"performance-table\">")?;
+        writeln!(writer, "                <thead>")?;
+        writeln!(writer, "                    <tr>")?;
+        writeln!(writer, "                        <th>Workload</th>")?;
+        writeln!(writer, "                        <th>Throughput</th>")?;
+        writeln!(writer, "                        <th>Avg Latency</th>")?;
+        writeln!(writer, "                        <th>P95 Latency</th>")?;
+        writeln!(writer, "                        <th>Success Rate</th>")?;
+        writeln!(writer, "                        <th>Status</th>")?;
+        writeln!(writer, "                    </tr>")?;
+        writeln!(writer, "                </thead>")?;
+        writeln!(writer, "                <tbody>")?;
 
         for result in results {
             let summary =
                 BenchmarkSummary::from_metrics(result.workload.to_string(), &result.metrics);
-            let success_class = if summary.success_rate > 0.95 {
-                "good"
+            let (status_class, status_text, badge_class) = if summary.success_rate > 0.95 {
+                ("status-good", "Excellent", "badge-success")
             } else if summary.success_rate > 0.9 {
-                "warning"
+                ("status-warning", "Good", "badge-warning")
             } else {
-                "error"
+                ("status-error", "Poor", "badge-error")
             };
 
-            writeln!(writer, "<tr>")?;
-            writeln!(writer, "<td>{}</td>", result.workload)?;
-            writeln!(writer, "<td>{:.0}</td>", summary.throughput_ops_per_sec)?;
-            writeln!(writer, "<td>{:.2}</td>", summary.avg_latency_ms)?;
-            writeln!(writer, "<td>{:.2}</td>", summary.p95_latency_ms)?;
+            writeln!(writer, "                    <tr>")?;
             writeln!(
                 writer,
-                "<td class=\"{}\">{:.1}%</td>",
-                success_class,
+                "                        <td><strong>{}</strong></td>",
+                result.workload
+            )?;
+            writeln!(
+                writer,
+                "                        <td>{} ops/sec</td>",
+                format_number(summary.throughput_ops_per_sec as u64)
+            )?;
+            writeln!(
+                writer,
+                "                        <td>{:.2} ms</td>",
+                summary.avg_latency_ms
+            )?;
+            writeln!(
+                writer,
+                "                        <td>{:.2} ms</td>",
+                summary.p95_latency_ms
+            )?;
+            writeln!(
+                writer,
+                "                        <td class=\"{}\">{:.1}%</td>",
+                status_class,
                 summary.success_rate * 100.0
             )?;
-            writeln!(writer, "<td>{:.3}%</td>", summary.error_rate * 100.0)?;
-            writeln!(writer, "</tr>")?;
+            writeln!(
+                writer,
+                "                        <td><span class=\"badge {}\">{}</span></td>",
+                badge_class, status_text
+            )?;
+            writeln!(writer, "                    </tr>")?;
         }
 
-        writeln!(writer, "</table>")?;
-        writeln!(writer, "</body></html>")?;
+        writeln!(writer, "                </tbody>")?;
+        writeln!(writer, "            </table>")?;
+        writeln!(writer, "        </div>")?;
+
+        // Throughput chart
+        writeln!(writer, "        <div class=\"section\">")?;
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>📊 Throughput Comparison</h3>")?;
+        writeln!(writer, "                <div class=\"chart-container\">")?;
+        writeln!(
+            writer,
+            "                    <canvas id=\"throughputChart\"></canvas>"
+        )?;
+        writeln!(writer, "                </div>")?;
+        writeln!(writer, "            </div>")?;
+        writeln!(writer, "        </div>")?;
+
+        // Latency chart
+        writeln!(writer, "        <div class=\"section\">")?;
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(writer, "                <h3>⏱️ Latency Analysis</h3>")?;
+        writeln!(writer, "                <div class=\"chart-container\">")?;
+        writeln!(
+            writer,
+            "                    <canvas id=\"latencyChart\"></canvas>"
+        )?;
+        writeln!(writer, "                </div>")?;
+        writeln!(writer, "            </div>")?;
+        writeln!(writer, "        </div>")?;
+
+        // System resource usage if memory analysis is enabled
+        writeln!(writer, "        <div class=\"section\">")?;
+        writeln!(writer, "            <div class=\"card\">")?;
+        writeln!(
+            writer,
+            "                <h3>💾 System Resource Utilization</h3>"
+        )?;
+        if self.include_memory_analysis && peak_memory > 0.0 {
+            writeln!(writer, "                <div class=\"chart-container\">")?;
+            writeln!(
+                writer,
+                "                    <canvas id=\"memoryChart\"></canvas>"
+            )?;
+            writeln!(writer, "                </div>")?;
+        } else {
+            writeln!(writer, "                <div class=\"disabled-section\">")?;
+            writeln!(
+                writer,
+                "                    <div class=\"disabled-message\">"
+            )?;
+            writeln!(writer, "                        <span class=\"disabled-pill\">Memory Analysis Disabled</span>")?;
+            writeln!(writer, "                        <p>Use <code>--memory-analysis</code> flag to enable detailed memory tracking and charts.</p>")?;
+            writeln!(writer, "                    </div>")?;
+            writeln!(writer, "                </div>")?;
+        }
+        writeln!(writer, "            </div>")?;
+        writeln!(writer, "        </div>")?;
+
+        // Recommendations section
+        writeln!(writer, "        <div class=\"recommendations\">")?;
+        writeln!(
+            writer,
+            "            <h3>💡 Performance Recommendations</h3>"
+        )?;
+
+        // Analyze and provide recommendations
+        let avg_cache_hit_rate: f64 = results
+            .iter()
+            .map(|r| r.memory_stats.block_cache_hit_rate)
+            .sum::<f64>()
+            / results.len() as f64;
+        let avg_lock_free_success: f64 = results
+            .iter()
+            .map(|r| r.lock_free_stats.success_rate)
+            .sum::<f64>()
+            / results.len() as f64;
+
+        if avg_success_rate > 0.95 && avg_cache_hit_rate > 0.85 && avg_lock_free_success > 0.95 {
+            writeln!(writer, "            <p>✅ <strong>Excellent Performance!</strong> Your Aster database is performing optimally across all metrics.</p>")?;
+        } else {
+            writeln!(writer, "            <ul>")?;
+            if avg_cache_hit_rate < 0.8 {
+                writeln!(writer, "                <li>📈 Consider increasing block cache size (current hit rate: {:.1}%)</li>", avg_cache_hit_rate * 100.0)?;
+            }
+            if avg_lock_free_success < 0.9 {
+                writeln!(writer, "                <li>🔧 High contention detected - consider reducing concurrency or optimizing access patterns</li>")?;
+            }
+            writeln!(
+                writer,
+                "                <li>📊 Monitor system resource usage during peak loads</li>"
+            )?;
+            writeln!(
+                writer,
+                "                <li>⚙️ Adjust MemTable size based on write patterns</li>"
+            )?;
+            writeln!(writer, "                <li>🗜️ Tune compression settings for your data characteristics</li>")?;
+            writeln!(writer, "            </ul>")?;
+        }
+
+        writeln!(writer, "        </div>")?;
+        writeln!(writer, "    </div>")?;
+
+        // JavaScript for charts
+        writeln!(writer, "    <script>")?;
+        writeln!(writer, "        // Throughput Chart")?;
+        writeln!(writer, "        const throughputCtx = document.getElementById('throughputChart').getContext('2d');")?;
+        writeln!(writer, "        new Chart(throughputCtx, {{")?;
+        writeln!(writer, "            type: 'bar',")?;
+        writeln!(writer, "            data: {{")?;
+        write!(writer, "                labels: [")?;
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "'{}'", result.workload)?;
+        }
+        writeln!(writer, "],")?;
+        writeln!(writer, "                datasets: [{{")?;
+        writeln!(writer, "                    label: 'Throughput (ops/sec)',")?;
+        write!(writer, "                    data: [")?;
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "{:.0}", result.metrics.operations_per_second)?;
+        }
+        writeln!(writer, "],")?;
+        writeln!(
+            writer,
+            "                    backgroundColor: 'rgba(37, 99, 235, 0.8)',"
+        )?;
+        writeln!(
+            writer,
+            "                    borderColor: 'rgba(37, 99, 235, 1)',"
+        )?;
+        writeln!(writer, "                    borderWidth: 1")?;
+        writeln!(writer, "                }}]")?;
+        writeln!(writer, "            }},")?;
+        writeln!(writer, "            options: {{")?;
+        writeln!(writer, "                responsive: true,")?;
+        writeln!(writer, "                maintainAspectRatio: false,")?;
+        writeln!(writer, "                scales: {{")?;
+        writeln!(writer, "                    y: {{ beginAtZero: true }}")?;
+        writeln!(writer, "                }}")?;
+        writeln!(writer, "            }}")?;
+        writeln!(writer, "        }});")?;
+
+        writeln!(writer, "        // Latency Chart")?;
+        writeln!(
+            writer,
+            "        const latencyCtx = document.getElementById('latencyChart').getContext('2d');"
+        )?;
+        writeln!(writer, "        new Chart(latencyCtx, {{")?;
+        writeln!(writer, "            type: 'line',")?;
+        writeln!(writer, "            data: {{")?;
+        write!(writer, "                labels: [")?;
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "'{}'", result.workload)?;
+        }
+        writeln!(writer, "],")?;
+        writeln!(writer, "                datasets: [{{")?;
+        writeln!(writer, "                    label: 'Average Latency (µs)',")?;
+        write!(writer, "                    data: [")?;
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            let avg_latency =
+                (result.metrics.avg_read_latency_us + result.metrics.avg_write_latency_us) / 2.0;
+            write!(writer, "{:.2}", avg_latency)?;
+        }
+        writeln!(writer, "],")?;
+        writeln!(
+            writer,
+            "                    borderColor: 'rgba(16, 185, 129, 1)',"
+        )?;
+        writeln!(
+            writer,
+            "                    backgroundColor: 'rgba(16, 185, 129, 0.1)',"
+        )?;
+        writeln!(writer, "                    tension: 0.4")?;
+        writeln!(writer, "                }}, {{")?;
+        writeln!(writer, "                    label: 'P95 Latency (µs)',")?;
+        write!(writer, "                    data: [")?;
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "{:.2}", result.metrics.p95_latency_us)?;
+        }
+        writeln!(writer, "],")?;
+        writeln!(
+            writer,
+            "                    borderColor: 'rgba(245, 158, 11, 1)',"
+        )?;
+        writeln!(
+            writer,
+            "                    backgroundColor: 'rgba(245, 158, 11, 0.1)',"
+        )?;
+        writeln!(writer, "                    tension: 0.4")?;
+        writeln!(writer, "                }}]")?;
+        writeln!(writer, "            }},")?;
+        writeln!(writer, "            options: {{")?;
+        writeln!(writer, "                responsive: true,")?;
+        writeln!(writer, "                maintainAspectRatio: false,")?;
+        writeln!(writer, "                scales: {{")?;
+        writeln!(writer, "                    y: {{ beginAtZero: true }}")?;
+        writeln!(writer, "                }}")?;
+        writeln!(writer, "            }}")?;
+        writeln!(writer, "        }});")?;
+
+        if self.include_memory_analysis && peak_memory > 0.0 {
+            writeln!(writer, "        // Memory Chart")?;
+            writeln!(writer, "        const memoryCtx = document.getElementById('memoryChart').getContext('2d');")?;
+            writeln!(writer, "        new Chart(memoryCtx, {{")?;
+            writeln!(writer, "            type: 'doughnut',")?;
+            writeln!(writer, "            data: {{")?;
+            writeln!(writer, "                labels: ['Cache Hits', 'Cache Misses', 'Pool Hits', 'Pool Misses'],")?;
+            writeln!(writer, "                datasets: [{{")?;
+            let avg_cache_hit = avg_cache_hit_rate * 100.0;
+            let avg_pool_hit: f64 = results
+                .iter()
+                .map(|r| r.memory_stats.memory_pool_hit_rate)
+                .sum::<f64>()
+                / results.len() as f64
+                * 100.0;
+            write!(
+                writer,
+                "                    data: [{:.1}, {:.1}, {:.1}, {:.1}],",
+                avg_cache_hit,
+                100.0 - avg_cache_hit,
+                avg_pool_hit,
+                100.0 - avg_pool_hit
+            )?;
+            writeln!(writer, "                    backgroundColor: [")?;
+            writeln!(writer, "                        'rgba(16, 185, 129, 0.8)',")?;
+            writeln!(writer, "                        'rgba(239, 68, 68, 0.8)',")?;
+            writeln!(writer, "                        'rgba(37, 99, 235, 0.8)',")?;
+            writeln!(writer, "                        'rgba(245, 158, 11, 0.8)'")?;
+            writeln!(writer, "                    ]")?;
+            writeln!(writer, "                }}]")?;
+            writeln!(writer, "            }},")?;
+            writeln!(writer, "            options: {{")?;
+            writeln!(writer, "                responsive: true,")?;
+            writeln!(writer, "                maintainAspectRatio: false")?;
+            writeln!(writer, "            }}")?;
+            writeln!(writer, "        }});")?;
+        }
+
+        writeln!(writer, "    </script>")?;
+        writeln!(writer, "</body>")?;
+        writeln!(writer, "</html>")?;
 
         Ok(())
     }

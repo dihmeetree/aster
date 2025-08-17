@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aster Database Benchmark Report</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #64748b;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --error-color: #ef4444;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --border-color: #e2e8f0;
+            --text-color: #1e293b;
+            --text-secondary: #64748b;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), #1d4ed8);
+            color: white;
+            padding: 40px;
+            border-radius: 16px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 25px rgba(37, 99, 235, 0.2);
+        }
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+            border: 1px solid var(--border-color);
+        }
+        .card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-color);
+        }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .metric-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+        .performance-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+        }
+        .performance-table th {
+            background: var(--primary-color);
+            color: white;
+            padding: 16px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .performance-table td {
+            padding: 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+        .performance-table tr:hover {
+            background-color: #f8fafc;
+        }
+        .status-good { color: var(--success-color); font-weight: 600; }
+        .status-warning { color: var(--warning-color); font-weight: 600; }
+        .status-error { color: var(--error-color); font-weight: 600; }
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin: 20px 0;
+        }
+        .section {
+            margin-bottom: 40px;
+        }
+        .section h2 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text-color);
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-success {
+            background-color: rgba(16, 185, 129, 0.1);
+            color: var(--success-color);
+        }
+        .badge-warning {
+            background-color: rgba(245, 158, 11, 0.1);
+            color: var(--warning-color);
+        }
+        .disabled-pill {
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: rgba(239, 68, 68, 0.1);
+            color: var(--error-color);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .disabled-section {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+            background-color: rgba(254, 242, 242, 0.8);
+            border-radius: 8px;
+            border: 2px dashed rgba(239, 68, 68, 0.3);
+        }
+        .disabled-message {
+            text-align: center;
+            color: var(--text-secondary);
+        }
+        .disabled-message p {
+            margin-top: 12px;
+            font-size: 0.9rem;
+        }
+        .disabled-message code {
+            background-color: rgba(100, 116, 139, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 0.85rem;
+        }
+        .recommendations {
+            background: linear-gradient(135deg, #f0fdf4, #ecfdf5);
+            border-left: 4px solid var(--success-color);
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 30px;
+        }
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .header { padding: 20px; }
+            .header h1 { font-size: 2rem; }
+            .metrics-grid { grid-template-columns: 1fr; }
+            .performance-table { font-size: 0.8rem; }
+            .performance-table th, .performance-table td { padding: 8px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Aster Database Benchmark Report</h1>
+            <p>Generated on August 17, 2025 at 11:03:25 UTC | 2 workloads analyzed</p>
+        </div>
+        <div class="metrics-grid">
+            <div class="card">
+                <h3>📊 Total Operations</h3>
+                <div class="metric-value">2,000</div>
+                <div class="metric-label">Operations Executed</div>
+            </div>
+            <div class="card">
+                <h3>⚡ Average Throughput</h3>
+                <div class="metric-value">144,949</div>
+                <div class="metric-label">Operations per Second</div>
+            </div>
+            <div class="card">
+                <h3>✅ Success Rate</h3>
+                <div class="metric-value status-good">100.0%</div>
+                <div class="metric-label">Successful Operations</div>
+            </div>
+            <div class="card">
+                <h3>💾 Peak Memory</h3>
+                <div class="metric-value"><span class="disabled-pill">Disabled</span></div>
+                <div class="metric-label">Use --memory-analysis to enable</div>
+            </div>
+        </div>
+        <div class="section">
+            <h2>📈 Performance Summary</h2>
+            <table class="performance-table">
+                <thead>
+                    <tr>
+                        <th>Workload</th>
+                        <th>Throughput</th>
+                        <th>Avg Latency</th>
+                        <th>P95 Latency</th>
+                        <th>Success Rate</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Mixed</strong></td>
+                        <td>224,653 ops/sec</td>
+                        <td>0.00 ms</td>
+                        <td>0.00 ms</td>
+                        <td class="status-good">100.0%</td>
+                        <td><span class="badge badge-success">Excellent</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Read-Heavy</strong></td>
+                        <td>65,244 ops/sec</td>
+                        <td>0.02 ms</td>
+                        <td>0.00 ms</td>
+                        <td class="status-good">100.0%</td>
+                        <td><span class="badge badge-success">Excellent</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="section">
+            <div class="card">
+                <h3>📊 Throughput Comparison</h3>
+                <div class="chart-container">
+                    <canvas id="throughputChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="section">
+            <div class="card">
+                <h3>⏱️ Latency Analysis</h3>
+                <div class="chart-container">
+                    <canvas id="latencyChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="section">
+            <div class="card">
+                <h3>💾 System Resource Utilization</h3>
+                <div class="disabled-section">
+                    <div class="disabled-message">
+                        <span class="disabled-pill">Memory Analysis Disabled</span>
+                        <p>Use <code>--memory-analysis</code> flag to enable detailed memory tracking and charts.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="recommendations">
+            <h3>💡 Performance Recommendations</h3>
+            <p>✅ <strong>Excellent Performance!</strong> Your Aster database is performing optimally across all metrics.</p>
+        </div>
+    </div>
+    <script>
+        // Throughput Chart
+        const throughputCtx = document.getElementById('throughputChart').getContext('2d');
+        new Chart(throughputCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Mixed', 'Read-Heavy'],
+                datasets: [{
+                    label: 'Throughput (ops/sec)',
+                    data: [224654, 65245],
+                    backgroundColor: 'rgba(37, 99, 235, 0.8)',
+                    borderColor: 'rgba(37, 99, 235, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+        // Latency Chart
+        const latencyCtx = document.getElementById('latencyChart').getContext('2d');
+        new Chart(latencyCtx, {
+            type: 'line',
+            data: {
+                labels: ['Mixed', 'Read-Heavy'],
+                datasets: [{
+                    label: 'Average Latency (µs)',
+                    data: [4.40, 19.49],
+                    borderColor: 'rgba(16, 185, 129, 1)',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    tension: 0.4
+                }, {
+                    label: 'P95 Latency (µs)',
+                    data: [0.00, 0.00],
+                    borderColor: 'rgba(245, 158, 11, 1)',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

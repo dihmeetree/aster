@@ -1,7 +1,6 @@
 use clap::{Arg, Command};
 use std::fs::File;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::{self};
 use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber;

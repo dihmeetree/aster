@@ -1,11 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
-use aster_db::benchmarks::{
-    BenchmarkConfig, BenchmarkReporter, BenchmarkSuite, OutputFormat, WorkloadType,
-};
+use aster_db::benchmarks::{BenchmarkConfig, BenchmarkSuite, WorkloadType};
 use aster_db::graph::Graph;
 use aster_db::storage::poly_lsm::PolyLSM;
 use aster_db::types::PolyLSMConfig;
