@@ -92,10 +92,21 @@ impl PropertyAnalyticsEngine {
             inventory
         );
 
-        self.db.gremlin_query(&add_product_query).await?;
+        let query_result = self.db.gremlin_query(&add_product_query).await?;
+
+        // Extract the actual vertex ID from the query result
+        let actual_vertex_id = if let Some(aster_db::query::GremlinResult::Vertex(vertex_id)) =
+            query_result.results.first()
+        {
+            *vertex_id
+        } else {
+            return Err(aster_db::AsterError::internal(
+                "Failed to get vertex ID from addV query",
+            ));
+        };
 
         let product = Product {
-            id: product_id,
+            id: actual_vertex_id,
             name: name.clone(),
             category,
             price,
@@ -104,8 +115,8 @@ impl PropertyAnalyticsEngine {
             inventory,
         };
 
-        self.products.insert(product_id, product);
-        Ok(product_id)
+        self.products.insert(actual_vertex_id, product);
+        Ok(actual_vertex_id)
     }
 
     /// Add a customer to the system
@@ -133,10 +144,21 @@ impl PropertyAnalyticsEngine {
             loyalty_tier.replace("'", "\\'")
         );
 
-        self.db.gremlin_query(&add_customer_query).await?;
+        let query_result = self.db.gremlin_query(&add_customer_query).await?;
+
+        // Extract the actual vertex ID from the query result
+        let actual_vertex_id = if let Some(aster_db::query::GremlinResult::Vertex(vertex_id)) =
+            query_result.results.first()
+        {
+            *vertex_id
+        } else {
+            return Err(aster_db::AsterError::internal(
+                "Failed to get vertex ID from addV query",
+            ));
+        };
 
         let customer = Customer {
-            id: customer_id,
+            id: actual_vertex_id,
             name: name.clone(),
             age,
             city: city.clone(),
@@ -144,8 +166,8 @@ impl PropertyAnalyticsEngine {
             loyalty_tier,
         };
 
-        self.customers.insert(customer_id, customer);
-        Ok(customer_id)
+        self.customers.insert(actual_vertex_id, customer);
+        Ok(actual_vertex_id)
     }
 
     /// Record a purchase transaction
@@ -317,11 +339,14 @@ impl PropertyAnalyticsEngine {
 
         let mut top_customers = Vec::new();
 
-        // Process vertex results
+        // Process projected map results
         for gremlin_result in result.results {
-            if let aster_db::query::GremlinResult::Vertex(vertex_id) = gremlin_result {
-                if let Some(customer) = self.customers.get(&vertex_id) {
-                    top_customers.push((vertex_id, customer.total_spent));
+            if let aster_db::query::GremlinResult::Map(map) = gremlin_result {
+                // Extract vertex ID from the "id" field
+                if let Some(aster_db::query::GremlinResult::Vertex(vertex_id)) = map.get("id") {
+                    if let Some(customer) = self.customers.get(vertex_id) {
+                        top_customers.push((*vertex_id, customer.total_spent));
+                    }
                 }
             }
         }
@@ -602,8 +627,8 @@ async fn test_complex_property_queries() {
         1,
         "Should find only the gaming laptop"
     );
-    assert_eq!(
-        high_end_electronics[0], laptop_id,
+    assert!(
+        high_end_electronics.contains(&laptop_id),
         "Should find the gaming laptop"
     );
 
@@ -729,12 +754,10 @@ async fn test_gremlin_property_operations() {
         customer_id.as_u64()
     );
     let amount_result = engine.db.gremlin_query(&amount_query).await.unwrap();
-    let amount = if let Some(aster_db::query::GremlinResult::Value(PropertyValue::Float(f))) =
-        amount_result.results.first()
-    {
-        *f
-    } else {
-        0.0
+    let amount = match amount_result.results.first() {
+        Some(aster_db::query::GremlinResult::Value(PropertyValue::Float(f))) => *f,
+        Some(aster_db::query::GremlinResult::Value(PropertyValue::Int(i))) => *i as f64,
+        _ => 0.0,
     };
     assert_eq!(amount, 200.0, "Purchase amount should be 100.0 * 2 = 200.0");
 }

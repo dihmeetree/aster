@@ -44,8 +44,8 @@ pub enum GremlinStep {
     OutV,
     /// Get target vertices from edges: .inV()
     InV,
-    /// Filter by property: .has("name", "alice")
-    Has(String, Option<PropertyValue>),
+    /// Filter by property: .has("name", "alice") or .has("price", gte(100.0))
+    Has(String, Option<PropertyValue>, Option<Box<GremlinPredicate>>),
     /// Filter by property existence: .hasKey("name")
     HasKey(String),
     /// Filter by property value: .hasValue("alice")
@@ -138,6 +138,8 @@ pub enum GremlinStep {
     Within(Vec<PropertyValue>),
     /// Without filter: .without(collection)
     Without(String), // Aggregate label
+    /// Within traversal filter: .within(traversal)
+    WithinTraversal(Box<GremlinTraversal>),
     /// Not equal: .neq(value)
     Neq(Box<GremlinTraversal>),
     /// Order local: .order(local)
@@ -248,7 +250,7 @@ impl GremlinTraversal {
     }
 
     pub fn has(self, key: String, value: Option<PropertyValue>) -> Self {
-        self.step(GremlinStep::Has(key, value))
+        self.step(GremlinStep::Has(key, value, None))
     }
 
     pub fn has_key(self, key: String) -> Self {
@@ -493,7 +495,6 @@ pub struct CreatedEdge {
 }
 
 /// Gremlin execution context with variable bindings
-#[derive(Debug)]
 pub struct GremlinContext {
     /// Query execution context
     pub query_context: QueryContext,
@@ -511,6 +512,17 @@ pub struct GremlinContext {
     pub incomplete_edges: Vec<IncompleteEdge>,
     /// Completed edges created during this traversal
     pub created_edges: Vec<CreatedEdge>,
+    /// Edge registry callback for global edge tracking
+    pub edge_registry_callback:
+        Option<Box<dyn Fn(EdgeId, VertexId, VertexId, String) + Send + Sync>>,
+    /// Get outgoing edges callback for global edge lookup
+    pub get_outgoing_edges_callback: Option<
+        Box<
+            dyn Fn(VertexId, Option<&str>) -> Vec<(EdgeId, VertexId, VertexId, String)>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl GremlinContext {
@@ -524,6 +536,8 @@ impl GremlinContext {
             created_vertices: Vec::new(),
             incomplete_edges: Vec::new(),
             created_edges: Vec::new(),
+            edge_registry_callback: None,
+            get_outgoing_edges_callback: None,
         }
     }
 
@@ -573,6 +587,24 @@ impl GremlinContext {
             created_vertices: Vec::new(), // Fresh vertex list for branch
             incomplete_edges: Vec::new(), // Fresh edge list for branch
             created_edges: Vec::new(),    // Fresh edge list for branch
+            edge_registry_callback: self
+                .edge_registry_callback
+                .as_ref()
+                .map(|f| {
+                    // We can't clone the callback, so we'll need to handle this differently
+                    // For now, we'll set it to None in branches
+                    None
+                })
+                .flatten(),
+            get_outgoing_edges_callback: self
+                .get_outgoing_edges_callback
+                .as_ref()
+                .map(|f| {
+                    // We can't clone the callback, so we'll need to handle this differently
+                    // For now, we'll set it to None in branches
+                    None
+                })
+                .flatten(),
         }
     }
 }
@@ -581,6 +613,7 @@ impl GremlinContext {
 pub struct GremlinEngine {
     graph: Arc<Graph>,
     property_store: Option<Arc<PropertyStore>>,
+    edge_registry: Option<Arc<dyn crate::EdgeRegistry>>,
 }
 
 impl GremlinEngine {
@@ -589,7 +622,13 @@ impl GremlinEngine {
         Self {
             graph,
             property_store,
+            edge_registry: None,
         }
+    }
+
+    /// Set the edge registry for global edge tracking
+    pub fn set_edge_registry(&mut self, edge_registry: Arc<dyn crate::EdgeRegistry>) {
+        self.edge_registry = Some(edge_registry);
     }
 
     /// Execute a Gremlin traversal
@@ -680,9 +719,52 @@ impl GremlinEngine {
                     let results = ids.iter().map(|&id| GremlinResult::Edge(id)).collect();
                     Ok(results)
                 } else {
-                    // All edges - this would require scanning all vertices for their edges
-                    // For now, return empty as a placeholder
-                    Ok(Vec::new())
+                    // All edges - get all edges from the global registry
+                    if let Some(ref edge_registry) = self.edge_registry {
+                        // Get all edges from the registry (we need a way to get all edges)
+                        // For now, we'll have to get all unique edge IDs by getting outgoing edges for all vertices
+                        // This is not efficient but will work for the tests
+                        // Get all vertices directly to avoid recursion
+                        let vertices_result = if let Some(ref property_store) = self.property_store
+                        {
+                            property_store
+                                .get_all_vertex_ids()
+                                .await?
+                                .into_iter()
+                                .map(|vertex_id| GremlinResult::Vertex(vertex_id))
+                                .collect::<Vec<_>>()
+                        } else {
+                            // Fall back to storage range scan
+                            self.graph
+                                .storage()
+                                .range(VertexId::from_u64(0), VertexId::from_u64(u64::MAX))
+                                .await?
+                                .into_iter()
+                                .map(|(vertex_id, _)| GremlinResult::Vertex(vertex_id))
+                                .collect::<Vec<_>>()
+                        };
+                        let mut all_edge_ids = HashSet::new();
+
+                        for vertex_result in &vertices_result {
+                            if let Some(vertex_id) = vertex_result.as_vertex() {
+                                let outgoing_edges =
+                                    edge_registry.get_outgoing_edges(vertex_id, None);
+                                for edge_entry in outgoing_edges {
+                                    all_edge_ids.insert(edge_entry.edge_id);
+                                }
+                            }
+                        }
+
+                        let edge_results: Vec<GremlinResult> = all_edge_ids
+                            .into_iter()
+                            .map(|edge_id| GremlinResult::Edge(edge_id))
+                            .collect();
+
+                        Ok(edge_results)
+                    } else {
+                        // No edge registry available, return empty
+                        Ok(Vec::new())
+                    }
                 }
             }
             GremlinStep::AddV(label) => {
@@ -733,9 +815,16 @@ impl GremlinEngine {
                 self.execute_has_label_step(results, label, context, stats)
                     .await
             }
-            GremlinStep::Has(key, value) => {
-                self.execute_has_step(results, key, value.as_ref(), context, stats)
-                    .await
+            GremlinStep::Has(key, value, predicate) => {
+                self.execute_has_step(
+                    results,
+                    key,
+                    value.as_ref(),
+                    predicate.as_ref(),
+                    context,
+                    stats,
+                )
+                .await
             }
             GremlinStep::HasKey(key) => {
                 self.execute_has_key_step(results, key, context, stats)
@@ -821,6 +910,10 @@ impl GremlinEngine {
             }
             GremlinStep::Without(aggregate_label) => {
                 self.execute_without_step(results, aggregate_label, context, stats)
+                    .await
+            }
+            GremlinStep::WithinTraversal(traversal) => {
+                self.execute_within_traversal_step(results, traversal, context, stats)
                     .await
             }
             GremlinStep::GroupCount => self.execute_group_count_step(results, context, stats).await,
@@ -941,7 +1034,30 @@ impl GremlinEngine {
                     }
                 }
 
-                // If no edges found in context, get edges from graph
+                // Look for edges in the global registry
+                if let Some(ref edge_registry) = self.edge_registry {
+                    let label_filter = labels
+                        .as_ref()
+                        .map(|l| l.first().map(|s| s.as_str()))
+                        .flatten();
+                    let global_edges = edge_registry.get_outgoing_edges(vertex_id, label_filter);
+
+                    for entry in global_edges {
+                        // Check if this edge matches the requested labels
+                        let should_include = if let Some(labels) = labels {
+                            labels.contains(&entry.label)
+                        } else {
+                            true // No label filter, include all edges
+                        };
+
+                        if should_include {
+                            edge_results.push(GremlinResult::Edge(entry.edge_id));
+                            found_edges = true;
+                        }
+                    }
+                }
+
+                // If no edges found in context or global registry, get edges from graph
                 if !found_edges {
                     let neighbors = self.graph.get_neighbors(vertex_id).await?;
                     stats.edges_traversed += neighbors.len();
@@ -961,14 +1077,44 @@ impl GremlinEngine {
     async fn execute_in_e_step(
         &self,
         results: Vec<GremlinResult>,
-        _labels: Option<&Vec<String>>,
-        _context: &mut GremlinContext,
-        _stats: &mut QueryStats,
+        labels: Option<&Vec<String>>,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
-        // For incoming edges, we'd need to scan all vertices to find those pointing to our vertices
-        // This is expensive, so for now we'll return empty results as a placeholder
-        // In a full implementation, we'd maintain reverse indexes
-        Ok(Vec::new())
+        let mut edge_results = Vec::new();
+
+        for result in results {
+            if let Some(vertex_id) = result.as_vertex() {
+                let mut found_edges = false;
+
+                // Look for edges in the global registry
+                if let Some(ref edge_registry) = self.edge_registry {
+                    let label_filter = labels
+                        .as_ref()
+                        .map(|l| l.first().map(|s| s.as_str()))
+                        .flatten();
+                    let global_edges = edge_registry.get_incoming_edges(vertex_id, label_filter);
+
+                    for entry in global_edges {
+                        // Check if this edge matches the requested labels
+                        let should_include = if let Some(labels) = labels {
+                            labels.contains(&entry.label)
+                        } else {
+                            true // No label filter, include all edges
+                        };
+
+                        if should_include {
+                            edge_results.push(GremlinResult::Edge(entry.edge_id));
+                            found_edges = true;
+                        }
+                    }
+                }
+
+                stats.vertices_visited += 1;
+            }
+        }
+
+        Ok(edge_results)
     }
 
     /// Execute .bothE() step - get both incoming and outgoing edges
@@ -1041,6 +1187,7 @@ impl GremlinEngine {
         results: Vec<GremlinResult>,
         key: &str,
         value: Option<&PropertyValue>,
+        predicate: Option<&Box<GremlinPredicate>>,
         context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
@@ -1056,12 +1203,31 @@ impl GremlinEngine {
                 let properties = property_store.get_vertex_properties(vertex_id).await?;
 
                 if let Some(prop_value) = properties.get(key) {
-                    if let Some(expected_value) = value {
-                        if prop_value == expected_value {
-                            filtered_results.push(result);
+                    let matches = if let Some(expected_value) = value {
+                        prop_value == expected_value
+                    } else if let Some(pred) = predicate {
+                        // Apply predicate
+                        match pred.as_ref() {
+                            GremlinPredicate::Gte(expected) => {
+                                self.compare_property_values(prop_value, expected) >= 0
+                            }
+                            GremlinPredicate::Lte(expected) => {
+                                self.compare_property_values(prop_value, expected) <= 0
+                            }
+                            GremlinPredicate::Gt(expected) => {
+                                self.compare_property_values(prop_value, expected) > 0
+                            }
+                            GremlinPredicate::Lt(expected) => {
+                                self.compare_property_values(prop_value, expected) < 0
+                            }
+                            _ => false, // Other predicates not supported here
                         }
                     } else {
                         // Just checking for property existence
+                        true
+                    };
+
+                    if matches {
                         filtered_results.push(result);
                     }
                 }
@@ -1083,7 +1249,7 @@ impl GremlinEngine {
         context: &mut GremlinContext,
         stats: &mut QueryStats,
     ) -> Result<Vec<GremlinResult>> {
-        self.execute_has_step(results, key, None, context, stats)
+        self.execute_has_step(results, key, None, None, context, stats)
             .await
     }
 
@@ -1137,15 +1303,29 @@ impl GremlinEngine {
         let mut value_results = Vec::new();
 
         for result in results {
-            if let Some(vertex_id) = result.as_vertex() {
-                let vertex_properties = property_store.get_vertex_properties(vertex_id).await?;
+            match result {
+                GremlinResult::Vertex(vertex_id) => {
+                    let vertex_properties = property_store.get_vertex_properties(vertex_id).await?;
 
-                for prop_name in properties {
-                    if let Some(prop_value) = vertex_properties.get(prop_name) {
-                        value_results.push(GremlinResult::Value(prop_value.clone()));
+                    for prop_name in properties {
+                        if let Some(prop_value) = vertex_properties.get(prop_name) {
+                            value_results.push(GremlinResult::Value(prop_value.clone()));
+                        }
+                    }
+                    stats.vertices_visited += 1;
+                }
+                GremlinResult::Edge(edge_id) => {
+                    let edge_properties = property_store.get_edge_properties(edge_id).await?;
+
+                    for prop_name in properties {
+                        if let Some(prop_value) = edge_properties.get(prop_name) {
+                            value_results.push(GremlinResult::Value(prop_value.clone()));
+                        }
                     }
                 }
-                stats.vertices_visited += 1;
+                _ => {
+                    // Skip other types of results
+                }
             }
         }
 
@@ -1382,8 +1562,49 @@ impl GremlinEngine {
                 results.sort_by(|a, b| self.compare_results(b, a));
             }
             Some(GremlinOrder::By(prop, direction)) => {
-                // Property-based ordering would require property access
-                // For now, just return unsorted
+                // Property-based ordering
+                if let Some(ref property_store) = self.property_store {
+                    let mut vertex_property_pairs = Vec::new();
+
+                    // Extract property values for sorting
+                    for result in results {
+                        if let Some(vertex_id) = result.as_vertex() {
+                            let properties =
+                                property_store.get_vertex_properties(vertex_id).await?;
+                            if let Some(prop_value) = properties.get(prop) {
+                                vertex_property_pairs.push((result, prop_value.clone()));
+                            } else {
+                                // Vertices without the property go to the end
+                                vertex_property_pairs
+                                    .push((result, PropertyValue::String("".to_string())));
+                            }
+                        } else {
+                            // Non-vertex results maintain their position
+                            vertex_property_pairs
+                                .push((result, PropertyValue::String("".to_string())));
+                        }
+                    }
+
+                    // Sort by property values
+                    match direction {
+                        GremlinOrderDirection::Asc => {
+                            vertex_property_pairs.sort_by(|(_, a), (_, b)| {
+                                self.compare_property_values(a, b).cmp(&0)
+                            });
+                        }
+                        GremlinOrderDirection::Desc => {
+                            vertex_property_pairs.sort_by(|(_, a), (_, b)| {
+                                self.compare_property_values(b, a).cmp(&0)
+                            });
+                        }
+                    }
+
+                    // Extract sorted results
+                    results = vertex_property_pairs
+                        .into_iter()
+                        .map(|(result, _)| result)
+                        .collect();
+                }
             }
             None => {
                 // Natural ordering
@@ -1930,41 +2151,45 @@ impl GremlinEngine {
                     if value_str.starts_with("gte(") && value_str.ends_with(")") {
                         let inner_value = &value_str[4..value_str.len() - 1];
                         let prop_value = Self::parse_property_value(inner_value)?;
-                        let predicate = GremlinPredicate::HasProperty(
+                        let predicate = GremlinPredicate::Gte(prop_value);
+                        Ok(GremlinStep::Has(
                             key.to_string(),
-                            Box::new(GremlinPredicate::Gte(prop_value)),
-                        );
-                        Ok(GremlinStep::Where(Box::new(predicate)))
+                            None,
+                            Some(Box::new(predicate)),
+                        ))
                     } else if value_str.starts_with("lte(") && value_str.ends_with(")") {
                         let inner_value = &value_str[4..value_str.len() - 1];
                         let prop_value = Self::parse_property_value(inner_value)?;
-                        let predicate = GremlinPredicate::HasProperty(
+                        let predicate = GremlinPredicate::Lte(prop_value);
+                        Ok(GremlinStep::Has(
                             key.to_string(),
-                            Box::new(GremlinPredicate::Lte(prop_value)),
-                        );
-                        Ok(GremlinStep::Where(Box::new(predicate)))
+                            None,
+                            Some(Box::new(predicate)),
+                        ))
                     } else if value_str.starts_with("gt(") && value_str.ends_with(")") {
                         let inner_value = &value_str[3..value_str.len() - 1];
                         let prop_value = Self::parse_property_value(inner_value)?;
-                        let predicate = GremlinPredicate::HasProperty(
+                        let predicate = GremlinPredicate::Gt(prop_value);
+                        Ok(GremlinStep::Has(
                             key.to_string(),
-                            Box::new(GremlinPredicate::Gt(prop_value)),
-                        );
-                        Ok(GremlinStep::Where(Box::new(predicate)))
+                            None,
+                            Some(Box::new(predicate)),
+                        ))
                     } else if value_str.starts_with("lt(") && value_str.ends_with(")") {
                         let inner_value = &value_str[3..value_str.len() - 1];
                         let prop_value = Self::parse_property_value(inner_value)?;
-                        let predicate = GremlinPredicate::HasProperty(
+                        let predicate = GremlinPredicate::Lt(prop_value);
+                        Ok(GremlinStep::Has(
                             key.to_string(),
-                            Box::new(GremlinPredicate::Lt(prop_value)),
-                        );
-                        Ok(GremlinStep::Where(Box::new(predicate)))
+                            None,
+                            Some(Box::new(predicate)),
+                        ))
                     } else {
                         let value = Some(Self::parse_property_value(value_str)?);
-                        Ok(GremlinStep::Has(key.to_string(), value))
+                        Ok(GremlinStep::Has(key.to_string(), value, None))
                     }
                 } else {
-                    Ok(GremlinStep::Has(key.to_string(), None))
+                    Ok(GremlinStep::Has(key.to_string(), None, None))
                 }
             } else {
                 Err(AsterError::invalid_operation("Invalid has() step"))
@@ -2129,6 +2354,21 @@ impl GremlinEngine {
                     .trim_matches('\'')
                     .to_string();
                 Ok(GremlinStep::Without(label))
+            } else if inner.starts_with("within(") && inner.ends_with(")") {
+                // Handle within(traversal) case
+                let within_inner = &inner[7..inner.len() - 1];
+                if within_inner.starts_with("g.") {
+                    // Parse the inner traversal
+                    let inner_traversal = Self::parse_query(within_inner)?;
+
+                    // Create a Within step with the traversal results
+                    // For now, we'll use a special WithinTraversal step to handle this
+                    Ok(GremlinStep::WithinTraversal(Box::new(inner_traversal)))
+                } else {
+                    Err(AsterError::invalid_operation(
+                        "Within with static values not yet supported",
+                    ))
+                }
             } else {
                 Err(AsterError::invalid_operation(
                     "Complex where not yet supported",
@@ -2295,11 +2535,12 @@ impl GremlinEngine {
         // Complete edges from context
         for incomplete_edge in &context.incomplete_edges {
             for &target_vertex in &target_vertices {
-                let edge_id = EdgeId::new();
-
-                self.graph
+                let edge = self
+                    .graph
                     .add_edge(incomplete_edge.source, target_vertex, None)
                     .await?;
+
+                let edge_id = edge.id();
 
                 // Store edge label in property store
                 if let Some(ref property_store) = self.property_store {
@@ -2320,6 +2561,16 @@ impl GremlinEngine {
                     target: target_vertex,
                     label: incomplete_edge.label.clone(),
                 });
+
+                // Register edge globally if edge registry is available
+                if let Some(ref edge_registry) = self.edge_registry {
+                    edge_registry.register_edge(
+                        edge_id,
+                        incomplete_edge.source,
+                        target_vertex,
+                        incomplete_edge.label.clone(),
+                    );
+                }
 
                 edge_results.push(GremlinResult::Edge(edge_id));
                 stats.edges_traversed += 1;
@@ -2445,6 +2696,37 @@ impl GremlinEngine {
                 match result.as_vertex() {
                     Some(vertex_id) => !aggregated_vertex_ids.contains(&vertex_id),
                     None => true, // Keep non-vertex results
+                }
+            })
+            .collect();
+
+        Ok(filtered_results)
+    }
+
+    /// Execute .within(traversal) step - filter results that are within the traversal results
+    async fn execute_within_traversal_step(
+        &self,
+        results: Vec<GremlinResult>,
+        within_traversal: &GremlinTraversal,
+        context: &mut GremlinContext,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<GremlinResult>> {
+        // Execute the within traversal to get the set of allowed values
+        let (within_results, _) = self.execute(within_traversal, context).await?;
+
+        // Create a set of vertex IDs from the within traversal results for fast lookup
+        let within_vertex_ids: HashSet<VertexId> = within_results
+            .iter()
+            .filter_map(|r| r.as_vertex())
+            .collect();
+
+        // Filter results to only include those that are within the traversal results
+        let filtered_results = results
+            .into_iter()
+            .filter(|result| {
+                match result.as_vertex() {
+                    Some(vertex_id) => within_vertex_ids.contains(&vertex_id),
+                    None => false, // Only keep vertex results that match
                 }
             })
             .collect();

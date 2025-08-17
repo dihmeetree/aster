@@ -88,10 +88,21 @@ impl SocialNetworkAnalyzer {
             interests.join(",")
         );
 
-        self.db.gremlin_query(&add_user_query).await?;
+        let query_result = self.db.gremlin_query(&add_user_query).await?;
+
+        // Extract the actual vertex ID from the query result
+        let actual_vertex_id = if let Some(aster_db::query::GremlinResult::Vertex(vertex_id)) =
+            query_result.results.first()
+        {
+            *vertex_id
+        } else {
+            return Err(aster_db::AsterError::internal(
+                "Failed to get vertex ID from addV query",
+            ));
+        };
 
         let user = User {
-            id: user_id,
+            id: actual_vertex_id,
             name: name.clone(),
             age,
             city,
@@ -99,8 +110,8 @@ impl SocialNetworkAnalyzer {
             follower_count: 0,
         };
 
-        self.users.insert(user_id, user);
-        Ok(user_id)
+        self.users.insert(actual_vertex_id, user);
+        Ok(actual_vertex_id)
     }
 
     /// Create a relationship between two users
@@ -203,20 +214,22 @@ impl SocialNetworkAnalyzer {
 
         // Process projection results
         for gremlin_result in result.results {
-            if let aster_db::query::GremlinResult::Vertex(vertex_id) = gremlin_result {
-                let follower_count_query =
-                    format!("g.V({}).inE('follow').count()", vertex_id.as_u64());
-
-                let count_result = self.db.gremlin_query(&follower_count_query).await?;
-                let follower_count = if let Some(aster_db::query::GremlinResult::Count(c)) =
-                    count_result.results.first()
-                {
-                    *c
-                } else {
-                    0
-                };
-
-                influencers.push((vertex_id, follower_count));
+            if let aster_db::query::GremlinResult::Map(map) = gremlin_result {
+                // Extract vertex ID from the "id" field
+                if let Some(aster_db::query::GremlinResult::Vertex(vertex_id)) = map.get("id") {
+                    // For now, manually count followers since the projection .by() clauses aren't fully implemented
+                    let follower_count_query =
+                        format!("g.V({}).inE('follow').count()", vertex_id.as_u64());
+                    let count_result = self.db.gremlin_query(&follower_count_query).await?;
+                    let follower_count = if let Some(aster_db::query::GremlinResult::Count(c)) =
+                        count_result.results.first()
+                    {
+                        *c
+                    } else {
+                        0
+                    };
+                    influencers.push((*vertex_id, follower_count));
+                }
             }
         }
 

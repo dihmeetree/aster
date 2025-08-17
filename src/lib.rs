@@ -38,7 +38,80 @@ pub use transaction::{
 pub use types::{EdgeId, PolyLSMConfig, Properties, PropertyValue, Timestamp, VertexId};
 pub use validation::{CostModelValidator, ValidationParameters, ValidationResult};
 
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Trait for edge registry operations
+pub trait EdgeRegistry: Send + Sync {
+    fn register_edge(&self, edge_id: EdgeId, source: VertexId, target: VertexId, label: String);
+    fn get_outgoing_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry>;
+    fn get_incoming_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry>;
+}
+
+/// Edge registry entry storing edge metadata
+#[derive(Debug, Clone)]
+pub struct EdgeRegistryEntry {
+    pub edge_id: EdgeId,
+    pub source: VertexId,
+    pub target: VertexId,
+    pub label: String,
+}
+
+/// Implementation of EdgeRegistry that wraps the internal edge registry
+struct EdgeRegistryImpl {
+    registry: Arc<RwLock<HashMap<EdgeId, EdgeRegistryEntry>>>,
+}
+
+impl EdgeRegistry for EdgeRegistryImpl {
+    fn register_edge(&self, edge_id: EdgeId, source: VertexId, target: VertexId, label: String) {
+        let entry = EdgeRegistryEntry {
+            edge_id,
+            source,
+            target,
+            label,
+        };
+        self.registry.write().insert(edge_id, entry);
+    }
+
+    fn get_outgoing_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        let registry = self.registry.read();
+        registry
+            .values()
+            .filter(|entry| {
+                entry.source == vertex_id && label_filter.map_or(true, |label| entry.label == label)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn get_incoming_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        let registry = self.registry.read();
+        registry
+            .values()
+            .filter(|entry| {
+                entry.target == vertex_id && label_filter.map_or(true, |label| entry.label == label)
+            })
+            .cloned()
+            .collect()
+    }
+}
 
 /// Configuration for AsterDB
 #[derive(Debug, Clone)]
@@ -76,6 +149,8 @@ pub struct AsterDB {
     gremlin_engine: GremlinEngine,
     range_scan_optimizer: RangeScanOptimizer,
     config: AsterDBConfig,
+    /// Global edge registry for tracking edges across query executions
+    edge_registry: Arc<RwLock<HashMap<EdgeId, EdgeRegistryEntry>>>,
 }
 
 impl AsterDB {
@@ -140,7 +215,10 @@ impl AsterDB {
         // Initialize range scan optimizer
         let range_scan_optimizer = RangeScanOptimizer::new(property_store.clone());
 
-        Ok(Self {
+        // Create edge registry
+        let edge_registry = Arc::new(RwLock::new(HashMap::new()));
+
+        let mut db = Self {
             storage,
             property_store,
             transaction_manager,
@@ -149,7 +227,16 @@ impl AsterDB {
             gremlin_engine,
             range_scan_optimizer,
             config,
-        })
+            edge_registry: edge_registry.clone(),
+        };
+
+        // Set edge registry on gremlin engine
+        db.gremlin_engine
+            .set_edge_registry(Arc::new(EdgeRegistryImpl {
+                registry: edge_registry,
+            }));
+
+        Ok(db)
     }
 
     /// Begin a new transaction
@@ -273,6 +360,55 @@ impl AsterDB {
             .as_ref()
             .map(|mc| mc.get_historical_metrics(duration_seconds))
             .unwrap_or_default()
+    }
+
+    /// Register an edge in the global registry
+    pub fn register_edge(
+        &self,
+        edge_id: EdgeId,
+        source: VertexId,
+        target: VertexId,
+        label: String,
+    ) {
+        let entry = EdgeRegistryEntry {
+            edge_id,
+            source,
+            target,
+            label,
+        };
+        self.edge_registry.write().insert(edge_id, entry);
+    }
+
+    /// Get edges originating from a vertex with optional label filtering
+    pub fn get_outgoing_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        let registry = self.edge_registry.read();
+        registry
+            .values()
+            .filter(|entry| {
+                entry.source == vertex_id && label_filter.map_or(true, |label| entry.label == label)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Get edges targeting a vertex with optional label filtering
+    pub fn get_incoming_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        let registry = self.edge_registry.read();
+        registry
+            .values()
+            .filter(|entry| {
+                entry.target == vertex_id && label_filter.map_or(true, |label| entry.label == label)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Export metrics in Prometheus format
@@ -589,6 +725,28 @@ impl AsterDB {
     /// Get the range scan optimizer reference for advanced usage
     pub fn range_scan_optimizer(&self) -> &RangeScanOptimizer {
         &self.range_scan_optimizer
+    }
+}
+
+impl EdgeRegistry for AsterDB {
+    fn register_edge(&self, edge_id: EdgeId, source: VertexId, target: VertexId, label: String) {
+        self.register_edge(edge_id, source, target, label);
+    }
+
+    fn get_outgoing_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        self.get_outgoing_edges(vertex_id, label_filter)
+    }
+
+    fn get_incoming_edges(
+        &self,
+        vertex_id: VertexId,
+        label_filter: Option<&str>,
+    ) -> Vec<EdgeRegistryEntry> {
+        self.get_incoming_edges(vertex_id, label_filter)
     }
 }
 

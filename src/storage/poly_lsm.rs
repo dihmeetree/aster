@@ -18,6 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc as StdArc;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -74,6 +75,8 @@ pub struct PolyLSM {
     compaction_semaphore: Arc<Semaphore>,
     /// Next SSTable file ID
     next_sstable_id: Arc<Mutex<u64>>,
+    /// Per-vertex locks for atomic edge updates
+    vertex_locks: Arc<Mutex<HashMap<VertexId, Arc<Mutex<()>>>>>,
 }
 
 impl std::fmt::Debug for PolyLSM {
@@ -98,6 +101,7 @@ impl Clone for PolyLSM {
             degree_sketch: Arc::clone(&self.degree_sketch),
             compaction_semaphore: Arc::clone(&self.compaction_semaphore),
             next_sstable_id: Arc::clone(&self.next_sstable_id),
+            vertex_locks: Arc::clone(&self.vertex_locks),
         }
     }
 }
@@ -149,6 +153,7 @@ impl PolyLSM {
             degree_sketch: Arc::new(RwLock::new(DegreeSketch::new(1000000))), // 1M vertices initially
             compaction_semaphore: Arc::new(Semaphore::new(2)), // Allow 2 concurrent compactions
             next_sstable_id: Arc::new(Mutex::new(1)),
+            vertex_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Load existing SSTables
@@ -249,6 +254,10 @@ impl PolyLSM {
 
     /// Add edge using pivot update (vertex-based)
     async fn add_edge_pivot(&self, source: VertexId, target: VertexId) -> Result<()> {
+        // Get exclusive lock for this vertex to prevent race conditions
+        let vertex_mutex = self.get_vertex_lock(source);
+        let _vertex_lock = vertex_mutex.lock();
+
         // Read current neighbors
         let current_neighbors = self.get_neighbors(source).await?;
 
@@ -271,6 +280,15 @@ impl PolyLSM {
         }
 
         Ok(())
+    }
+
+    /// Get or create a lock for a specific vertex
+    fn get_vertex_lock(&self, vertex_id: VertexId) -> Arc<Mutex<()>> {
+        let mut locks = self.vertex_locks.lock();
+        locks
+            .entry(vertex_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Insert an entry into the active MemTable
