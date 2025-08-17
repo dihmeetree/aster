@@ -45,6 +45,7 @@ pub struct Graph<'a> {
 impl<'a> Graph<'a> {
     pub async fn add_vertex(&self, vertex_id: VertexId, properties: Option<Properties>) -> Result<()>
     pub async fn add_edge(&self, source: VertexId, target: VertexId, properties: Option<Properties>) -> Result<()>
+    pub async fn delete_edge(&self, source: VertexId, target: VertexId) -> Result<()>  // Paper-compliant deletion markers
     pub async fn get_neighbors(&self, vertex_id: VertexId) -> Result<Vec<VertexId>>
 }
 ```

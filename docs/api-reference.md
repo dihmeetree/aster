@@ -106,8 +106,12 @@ impl<'a> Graph<'a> {
     /// Remove a vertex and all its edges
     pub async fn remove_vertex(&self, vertex_id: VertexId) -> Result<()>
 
-    /// Remove an edge between two vertices
+    /// Remove an edge between two vertices (legacy method)
     pub async fn remove_edge(&self, source: VertexId, target: VertexId) -> Result<()>
+
+    /// Delete an edge using paper-compliant deletion markers
+    /// This preserves neighbor list structure for cost model calculations
+    pub async fn delete_edge(&self, source: VertexId, target: VertexId) -> Result<()>
 
     /// Get all neighbors of a vertex
     pub async fn get_neighbors(&self, vertex_id: VertexId) -> Result<Vec<VertexId>>
@@ -419,6 +423,9 @@ pub struct PolyLSMConfig {
     // Memory management
     pub block_cache_size: usize,              // Block cache size limit
     pub memory_pool_size: usize,              // Memory pool size limit
+
+    // 1-leveling optimization
+    pub enable_1_leveling: bool,              // Enable 1-leveling optimization for write-heavy workloads
 }
 
 impl PolyLSMConfig {
@@ -436,6 +443,24 @@ impl PolyLSMConfig {
             compression_enabled: true,
             block_cache_size: 256 * 1024 * 1024,
             memory_pool_size: 32 * 1024 * 1024,
+        }
+    }
+
+    /// Write-optimized 1-leveling configuration
+    pub fn with_1_leveling() -> Self {
+        Self {
+            max_levels: 2,                    // L = 2 levels (1-leveling)
+            level_size_ratio: 10,            // T = 10 (same ratio)
+            block_size: 4 * 1024,           // B = 4KB (same block size)
+            memtable_size: 64 * 1024 * 1024,
+            lookup_ratio: 0.3,              // Lower lookup ratio for write workloads
+            degree_sketch_bits_per_vertex: 8,
+            compaction_concurrency: 2,
+            bloom_filter_bits_per_key: 10,
+            compression_enabled: true,
+            block_cache_size: 256 * 1024 * 1024,
+            memory_pool_size: 32 * 1024 * 1024,
+            enable_1_leveling: true,         // Enable 1-leveling optimization
         }
     }
 

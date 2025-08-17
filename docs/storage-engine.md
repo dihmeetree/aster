@@ -8,6 +8,8 @@ The Poly-LSM engine combines traditional LSM-tree benefits (write optimization, 
 
 - **Adaptive Update Strategies**: Dynamic selection between delta and pivot updates
 - **Degree-Aware Optimization**: Uses vertex degree for update method selection
+- **Edge Deletion**: Paper-compliant deletion markers preserving neighbor list structure
+- **Configurable LSM-tree**: Standard multi-level (L=4) and write-optimized 1-leveling (L=2)
 - **Multi-Version Storage**: MVCC support with timestamp-based versioning
 - **Lock-Free Concurrency**: Atomic operations for high-performance coordination
 
@@ -30,9 +32,11 @@ impl PolyLSMConfig {
 }
 ```
 
-### Level Structure
+### LSM-Tree Configurations
 
-The LSM-tree maintains exactly **4 levels (L=4)** with exponential size growth:
+#### Standard Multi-Level (Default)
+
+The standard LSM-tree maintains exactly **4 levels (L=4)** with exponential size growth:
 
 ```
 Level 0: 64MB   (MemTable flush target)
@@ -41,6 +45,38 @@ Level 2: 640MB  (10x growth)
 Level 3: 6.4GB  (10x growth)
 Level 4: 64GB   (10x growth)
 ```
+
+#### 1-leveling Write-Optimized Configuration
+
+For write-heavy workloads, the **1-leveling extension** uses only **2 levels (L=2)**:
+
+```rust
+impl PolyLSMConfig {
+    pub fn with_1_leveling() -> Self {
+        Self {
+            max_levels: 2,                    // L = 2 levels (1-leveling)
+            level_size_ratio: 10,            // T = 10 (same ratio)
+            block_size: 4 * 1024,           // B = 4KB (same block size)
+            lookup_ratio: 0.3,              // Lower lookup ratio for write workloads
+            enable_1_leveling: true,         // Enable 1-leveling optimization
+            // ... other parameters same as paper specification
+        }
+    }
+}
+```
+
+**1-leveling Structure**:
+
+```
+Level 0: 64MB   (MemTable flush target)
+Level 1: 640MB  (10x growth, final level)
+```
+
+**Benefits**:
+
+- **Faster writes**: Fewer compaction levels to traverse
+- **Reduced write amplification**: Less data movement between levels
+- **Lower latency**: Immediate writes to fewer levels
 
 ## Update Methods
 
@@ -118,6 +154,56 @@ async fn add_edge_pivot(&self, source: VertexId, target: VertexId) -> Result<()>
 ```
 L_pivot(d) = log₂(F) + log₂(d)
 ```
+
+## Edge Deletion with Deletion Markers
+
+The Aster paper specifies using **special deletion marker values** instead of physically removing edges from neighbor lists. This preserves the structure needed for cost model calculations.
+
+### Implementation
+
+```rust
+async fn delete_edge(&self, source: VertexId, target: VertexId) -> Result<()> {
+    // Get current neighbor list
+    let current_encoded = self.get_encoded_neighbors(source).await?;
+
+    // Add deletion marker for the target vertex
+    let to_delete = vec![target];
+    let encoded_with_deletion = add_edge_deletion_markers(&current_encoded, &to_delete)?;
+
+    // Create delta entry with deletion marker
+    let entry = MemTableEntry::new_delta(encoded_with_deletion, Timestamp::now());
+
+    self.insert_entry(source, entry).await?;
+    Ok(())
+}
+```
+
+### Deletion Marker Encoding
+
+```rust
+/// Special marker value for deleted edges (using max u64 value)
+pub const EDGE_DELETION_MARKER: u64 = u64::MAX;
+
+/// Add deletion markers for specific edges
+pub fn add_edge_deletion_markers(encoded: &[u8], to_delete: &[VertexId]) -> Result<Vec<u8>> {
+    let mut neighbors = decode_neighbors(encoded)?;
+
+    // Add deletion markers for each edge to be deleted
+    for vertex_id in to_delete {
+        let deletion_marker = VertexId::from_u64(EDGE_DELETION_MARKER - vertex_id.as_u64());
+        neighbors.push(deletion_marker);
+    }
+
+    Ok(encode_neighbors(&neighbors))
+}
+```
+
+### Benefits
+
+- **Cost model preservation**: Original degree counts remain accurate for threshold calculations
+- **MVCC compatibility**: Deletion markers work naturally with versioning
+- **Efficient compaction**: Markers are processed during normal compaction cycles
+- **No data loss**: Deletion history is preserved for recovery scenarios
 
 ## Entry Types and Encoding
 
