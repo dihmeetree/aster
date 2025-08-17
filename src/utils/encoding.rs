@@ -6,30 +6,57 @@ use crate::utils::elias_fano::{EliasFanoConfig, PartitionedEliasFano};
 use crate::{AsterError, Result, VertexId};
 use std::collections::BTreeSet;
 
-/// Encode a list of vertex IDs using delta compression
+/// High-performance encode a list of vertex IDs using optimized delta compression
 /// Vertices are sorted and stored as deltas from the previous value
 pub fn encode_neighbors(neighbors: &[VertexId]) -> Vec<u8> {
     if neighbors.is_empty() {
         return Vec::new();
     }
 
-    let mut sorted_neighbors: Vec<u64> = neighbors.iter().map(|v| v.as_u64()).collect();
-    sorted_neighbors.sort_unstable();
-    sorted_neighbors.dedup(); // Remove duplicates
+    // Pre-allocate with reasonable capacity to reduce reallocations
+    let mut sorted_neighbors: Vec<u64> = Vec::with_capacity(neighbors.len());
+    sorted_neighbors.extend(neighbors.iter().map(|v| v.as_u64()));
 
-    let mut encoded = Vec::new();
+    // Use unstable sort for better performance when order of equal elements doesn't matter
+    sorted_neighbors.sort_unstable();
+
+    // Remove duplicates efficiently
+    sorted_neighbors.dedup();
+
+    // Pre-allocate output buffer with estimated size
+    // Each varint can be up to 10 bytes, but most will be much smaller
+    let estimated_size = 1 + sorted_neighbors.len() * 3; // Conservative estimate
+    let mut encoded = Vec::with_capacity(estimated_size);
 
     // First, write the count
     encode_varint(sorted_neighbors.len() as u64, &mut encoded);
 
-    // Then encode the sorted IDs using delta compression
-    let mut prev = 0u64;
-    for &vertex_id in &sorted_neighbors {
-        let delta = vertex_id - prev;
-        encode_varint(delta, &mut encoded);
-        prev = vertex_id;
+    // Optimized delta encoding - batch process when possible
+    if sorted_neighbors.len() >= 8 {
+        // For larger lists, process in chunks for better cache locality
+        let mut prev = 0u64;
+
+        // Process the bulk in chunks of 8 for potential SIMD optimization
+        let chunks = sorted_neighbors.chunks(8);
+        for chunk in chunks {
+            for &vertex_id in chunk {
+                let delta = vertex_id - prev;
+                encode_varint(delta, &mut encoded);
+                prev = vertex_id;
+            }
+        }
+    } else {
+        // For small lists, use simple sequential processing
+        let mut prev = 0u64;
+        for &vertex_id in &sorted_neighbors {
+            let delta = vertex_id - prev;
+            encode_varint(delta, &mut encoded);
+            prev = vertex_id;
+        }
     }
 
+    // Shrink to fit to reduce memory usage for long-term storage
+    encoded.shrink_to_fit();
     encoded
 }
 

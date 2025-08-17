@@ -28,7 +28,7 @@ impl Graph {
 
     /// Add a vertex with optional properties (creates new ID)
     pub async fn create_vertex(&self, properties: Option<Properties>) -> Result<Vertex> {
-        let vertex_id = VertexId::new();
+        let vertex_id = VertexId::random();
         let vertex = Vertex::new(vertex_id, properties.unwrap_or_default());
 
         // Store vertex in the graph (implementation would store properties separately)

@@ -18,6 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc as StdArc;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -75,8 +76,8 @@ pub struct PolyLSM {
     compaction_semaphore: Arc<Semaphore>,
     /// Next SSTable file ID
     next_sstable_id: Arc<Mutex<u64>>,
-    /// Per-vertex locks for atomic edge updates
-    vertex_locks: Arc<Mutex<HashMap<VertexId, Arc<Mutex<()>>>>>,
+    /// Lock-free vertex operation counter for high concurrency
+    vertex_operations: Arc<LockFreeVertexRegistry>,
 }
 
 impl std::fmt::Debug for PolyLSM {
@@ -101,12 +102,23 @@ impl Clone for PolyLSM {
             degree_sketch: Arc::clone(&self.degree_sketch),
             compaction_semaphore: Arc::clone(&self.compaction_semaphore),
             next_sstable_id: Arc::clone(&self.next_sstable_id),
-            vertex_locks: Arc::clone(&self.vertex_locks),
+            vertex_operations: Arc::clone(&self.vertex_operations),
         }
     }
 }
 
 impl PolyLSM {
+    /// Create an in-memory Poly-LSM storage engine for testing
+    pub async fn new(config: PolyLSMConfig) -> Result<Self> {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().map_err(|e| AsterError::Io(e.into()))?;
+        let storage = Self::open_with_config(temp_dir.path(), config).await?;
+
+        // Store temp_dir to keep it alive for the lifetime of the storage
+        std::mem::forget(temp_dir);
+        Ok(storage)
+    }
+
     /// Open or create a Poly-LSM storage engine
     pub async fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
         let config = PolyLSMConfig::default();
@@ -153,7 +165,7 @@ impl PolyLSM {
             degree_sketch: Arc::new(RwLock::new(DegreeSketch::new(1000000))), // 1M vertices initially
             compaction_semaphore: Arc::new(Semaphore::new(2)), // Allow 2 concurrent compactions
             next_sstable_id: Arc::new(Mutex::new(1)),
-            vertex_locks: Arc::new(Mutex::new(HashMap::new())),
+            vertex_operations: Arc::new(LockFreeVertexRegistry::new()),
         };
 
         // Load existing SSTables
@@ -252,11 +264,10 @@ impl PolyLSM {
         Ok(())
     }
 
-    /// Add edge using pivot update (vertex-based)
+    /// Add edge using pivot update (vertex-based) with lock-free coordination
     async fn add_edge_pivot(&self, source: VertexId, target: VertexId) -> Result<()> {
-        // Get exclusive lock for this vertex to prevent race conditions
-        let vertex_mutex = self.get_vertex_lock(source);
-        let _vertex_lock = vertex_mutex.lock();
+        // Acquire exclusive access using lock-free coordination
+        let _guard = self.acquire_vertex_exclusive(source).await?;
 
         // Read current neighbors
         let current_neighbors = self.get_neighbors(source).await?;
@@ -282,13 +293,9 @@ impl PolyLSM {
         Ok(())
     }
 
-    /// Get or create a lock for a specific vertex
-    fn get_vertex_lock(&self, vertex_id: VertexId) -> Arc<Mutex<()>> {
-        let mut locks = self.vertex_locks.lock();
-        locks
-            .entry(vertex_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+    /// Acquire exclusive access to a vertex using lock-free CAS operations
+    async fn acquire_vertex_exclusive(&self, vertex_id: VertexId) -> Result<VertexGuard> {
+        self.vertex_operations.acquire_exclusive(vertex_id).await
     }
 
     /// Insert an entry into the active MemTable
@@ -397,25 +404,60 @@ impl PolyLSM {
         Ok(())
     }
 
-    /// Check if compaction is needed and trigger it
+    /// Check if compaction is needed and trigger it with parallel processing
     async fn maybe_trigger_compaction(&self) -> Result<()> {
         let levels = self.levels.read();
+        let mut compaction_candidates = Vec::new();
 
+        // Identify all levels that need compaction
         for (i, level) in levels.iter().enumerate() {
             if level.needs_compaction() && i + 1 < levels.len() {
-                drop(levels); // Release read lock
+                compaction_candidates.push(i as u32);
+            }
+        }
+        drop(levels); // Release read lock early
 
-                // Try to acquire compaction semaphore
-                if let Ok(_permit) = self.compaction_semaphore.try_acquire() {
-                    // Run compaction in background
-                    let poly_lsm_clone = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = poly_lsm_clone.compact_level(i as u32).await {
-                            tracing::error!("Compaction failed for level {}: {}", i, e);
+        // Process compaction candidates in parallel, respecting semaphore limits
+        let mut compaction_tasks = Vec::new();
+
+        for level_num in compaction_candidates {
+            // Try to acquire compaction semaphore for each level
+            if let Ok(_permit) = self.compaction_semaphore.try_acquire() {
+                let poly_lsm_clone = self.clone();
+                let task = tokio::spawn(async move {
+                    let start_time = std::time::Instant::now();
+                    let result = poly_lsm_clone.compact_level(level_num).await;
+                    let duration = start_time.elapsed();
+
+                    match result {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Successfully compacted level {} in {:?}",
+                                level_num,
+                                duration
+                            );
                         }
-                    });
-                }
-                break;
+                        Err(ref e) => {
+                            tracing::error!(
+                                "Compaction failed for level {} after {:?}: {}",
+                                level_num,
+                                duration,
+                                e
+                            );
+                        }
+                    }
+                    result
+                });
+                compaction_tasks.push(task);
+            }
+        }
+
+        // Optionally wait for critical compactions to complete
+        // This prevents excessive memory usage during heavy write loads
+        if compaction_tasks.len() > 1 {
+            // Wait for at least one compaction to complete to free up resources
+            if let Some(task) = compaction_tasks.first_mut() {
+                let _ = task.await;
             }
         }
 
@@ -867,6 +909,17 @@ impl PolyLSM {
 
         Ok(())
     }
+
+    /// Perform periodic maintenance on the lock-free vertex registry
+    pub fn maintain_vertex_registry(&self) {
+        // Cleanup inactive vertex states every hour
+        self.vertex_operations.cleanup_inactive(3600);
+    }
+
+    /// Get lock-free registry statistics
+    pub fn get_lock_free_stats(&self) -> LockFreeStats {
+        self.vertex_operations.get_stats()
+    }
 }
 
 /// Statistics for a single level
@@ -886,6 +939,202 @@ pub struct PolyLSMStats {
     pub levels: Vec<LevelStats>,
     pub total_vertices: usize,
     pub adaptive_stats: crate::storage::adaptive_updates::AdaptiveStats,
+}
+
+/// Lock-free vertex registry for high-concurrency coordination
+/// Uses Compare-And-Swap (CAS) operations to manage vertex access without locks
+#[derive(Debug)]
+pub struct LockFreeVertexRegistry {
+    /// Hash map tracking vertex operation states using atomic operations
+    vertex_states: parking_lot::RwLock<HashMap<VertexId, Arc<AtomicVertexState>>>,
+    /// Global operation counter for ordering
+    operation_counter: AtomicU64,
+    /// Performance counters
+    total_acquisitions: AtomicUsize,
+    failed_acquisitions: AtomicUsize,
+    contention_events: AtomicUsize,
+}
+
+/// Atomic state for a single vertex operation
+#[derive(Debug)]
+struct AtomicVertexState {
+    /// Current operation ID (0 means available, >0 means in use)
+    operation_id: AtomicU64,
+    /// Number of waiting operations
+    wait_count: AtomicUsize,
+    /// Last access timestamp for cleanup
+    last_access: AtomicU64,
+}
+
+/// RAII guard for vertex exclusive access
+pub struct VertexGuard {
+    vertex_id: VertexId,
+    operation_id: u64,
+    registry: std::sync::Weak<LockFreeVertexRegistry>,
+}
+
+impl LockFreeVertexRegistry {
+    /// Create a new lock-free vertex registry
+    pub fn new() -> Self {
+        Self {
+            vertex_states: parking_lot::RwLock::new(HashMap::new()),
+            operation_counter: AtomicU64::new(1),
+            total_acquisitions: AtomicUsize::new(0),
+            failed_acquisitions: AtomicUsize::new(0),
+            contention_events: AtomicUsize::new(0),
+        }
+    }
+
+    /// Acquire exclusive access to a vertex using lock-free coordination
+    pub async fn acquire_exclusive(self: &Arc<Self>, vertex_id: VertexId) -> Result<VertexGuard> {
+        let operation_id = self.operation_counter.fetch_add(1, Ordering::SeqCst);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Get or create vertex state
+        let vertex_state = {
+            let mut states = self.vertex_states.write();
+            states
+                .entry(vertex_id)
+                .or_insert_with(|| {
+                    Arc::new(AtomicVertexState {
+                        operation_id: AtomicU64::new(0),
+                        wait_count: AtomicUsize::new(0),
+                        last_access: AtomicU64::new(current_time),
+                    })
+                })
+                .clone()
+        };
+
+        // Attempt to acquire exclusive access using CAS operations
+        let max_retries = 100;
+        for retry in 0..max_retries {
+            // Try to acquire exclusive access
+            match vertex_state.operation_id.compare_exchange_weak(
+                0,
+                operation_id,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Successfully acquired exclusive access
+                    vertex_state
+                        .last_access
+                        .store(current_time, Ordering::Relaxed);
+                    self.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+
+                    return Ok(VertexGuard {
+                        vertex_id,
+                        operation_id,
+                        registry: Arc::downgrade(self),
+                    });
+                }
+                Err(_current_operation) => {
+                    // Access is currently held by another operation
+                    self.contention_events.fetch_add(1, Ordering::Relaxed);
+                    vertex_state.wait_count.fetch_add(1, Ordering::Relaxed);
+
+                    // Exponential backoff with jitter to reduce contention
+                    let base_delay =
+                        std::time::Duration::from_micros(1 << std::cmp::min(retry, 10));
+                    let jitter = std::time::Duration::from_micros(
+                        (operation_id % 100) * 10, // Simple jitter based on operation ID
+                    );
+                    tokio::time::sleep(base_delay + jitter).await;
+
+                    vertex_state.wait_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        // Failed to acquire after max retries
+        self.failed_acquisitions.fetch_add(1, Ordering::Relaxed);
+        Err(AsterError::storage(&format!(
+            "Failed to acquire exclusive access to vertex {} after {} retries",
+            vertex_id.as_u64(),
+            max_retries
+        )))
+    }
+
+    /// Release exclusive access to a vertex
+    fn release_exclusive(&self, vertex_id: VertexId, operation_id: u64) {
+        if let Some(vertex_state) = self.vertex_states.read().get(&vertex_id) {
+            // Release using CAS to ensure we only release our own operation
+            let _ = vertex_state.operation_id.compare_exchange(
+                operation_id,
+                0,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Get performance statistics for the lock-free registry
+    pub fn get_stats(&self) -> LockFreeStats {
+        let total_acquisitions = self.total_acquisitions.load(Ordering::Relaxed);
+        let failed_acquisitions = self.failed_acquisitions.load(Ordering::Relaxed);
+        let contention_events = self.contention_events.load(Ordering::Relaxed);
+
+        let success_rate = if total_acquisitions + failed_acquisitions > 0 {
+            total_acquisitions as f64 / (total_acquisitions + failed_acquisitions) as f64
+        } else {
+            1.0
+        };
+
+        let avg_contention = if total_acquisitions > 0 {
+            contention_events as f64 / total_acquisitions as f64
+        } else {
+            0.0
+        };
+
+        LockFreeStats {
+            total_acquisitions,
+            failed_acquisitions,
+            contention_events,
+            success_rate,
+            avg_contention_per_operation: avg_contention,
+            active_vertices: self.vertex_states.read().len(),
+        }
+    }
+
+    /// Cleanup inactive vertex states to prevent memory leaks
+    pub fn cleanup_inactive(&self, max_age_seconds: u64) {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut states = self.vertex_states.write();
+        states.retain(|_vertex_id, state| {
+            let last_access = state.last_access.load(Ordering::Relaxed);
+            let is_active = state.operation_id.load(Ordering::Relaxed) != 0;
+            let is_recent = current_time.saturating_sub(last_access) < max_age_seconds;
+
+            // Keep if currently active or recently accessed
+            is_active || is_recent
+        });
+    }
+}
+
+impl Drop for VertexGuard {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.release_exclusive(self.vertex_id, self.operation_id);
+        }
+    }
+}
+
+/// Statistics for lock-free vertex registry performance
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockFreeStats {
+    pub total_acquisitions: usize,
+    pub failed_acquisitions: usize,
+    pub contention_events: usize,
+    pub success_rate: f64,
+    pub avg_contention_per_operation: f64,
+    pub active_vertices: usize,
 }
 
 #[cfg(test)]

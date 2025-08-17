@@ -11,6 +11,7 @@
 //! - **ACID Transactions**: Full transaction support with MVCC
 //! - **Flexible Querying**: Rich graph traversal and query capabilities
 
+pub mod benchmarks;
 pub mod error;
 pub mod graph;
 pub mod metrics;

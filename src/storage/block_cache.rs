@@ -106,45 +106,112 @@ impl Default for BlockCacheConfig {
     }
 }
 
-/// Memory pool for reducing allocations
+/// High-performance memory pool with size-based buckets for reducing allocations
 #[derive(Debug)]
 struct MemoryPool {
-    free_blocks: Vec<Vec<u8>>,
+    // Size buckets: [0-4KB, 4KB-16KB, 16KB-64KB, 64KB+]
+    small_blocks: Vec<Vec<u8>>,  // 0-4KB
+    medium_blocks: Vec<Vec<u8>>, // 4KB-16KB
+    large_blocks: Vec<Vec<u8>>,  // 16KB-64KB
+    xl_blocks: Vec<Vec<u8>>,     // 64KB+
     total_size: usize,
     max_size: usize,
+    // Performance counters
+    hits: usize,
+    misses: usize,
 }
 
 impl MemoryPool {
     fn new(max_size: usize) -> Self {
         Self {
-            free_blocks: Vec::new(),
+            small_blocks: Vec::new(),
+            medium_blocks: Vec::new(),
+            large_blocks: Vec::new(),
+            xl_blocks: Vec::new(),
             total_size: 0,
             max_size,
+            hits: 0,
+            misses: 0,
         }
     }
 
     fn get_block(&mut self, min_size: usize) -> Vec<u8> {
-        // Try to find a suitable block from the pool
-        for i in 0..self.free_blocks.len() {
-            if self.free_blocks[i].capacity() >= min_size {
-                let mut block = self.free_blocks.swap_remove(i);
+        let bucket = match min_size {
+            0..=4096 => &mut self.small_blocks,
+            4097..=16384 => &mut self.medium_blocks,
+            16385..=65536 => &mut self.large_blocks,
+            _ => &mut self.xl_blocks,
+        };
+
+        // Try to get a block from the appropriate bucket
+        if let Some(mut block) = bucket.pop() {
+            if block.capacity() >= min_size {
                 self.total_size -= block.capacity();
                 block.clear();
+                self.hits += 1;
                 return block;
+            } else {
+                // Block too small, put it back and fall through to allocation
+                bucket.push(block);
             }
         }
 
-        // No suitable block found, allocate new one
-        Vec::with_capacity(min_size.max(4096))
+        // Try other buckets for larger blocks
+        for larger_bucket in [
+            &mut self.medium_blocks,
+            &mut self.large_blocks,
+            &mut self.xl_blocks,
+        ] {
+            if let Some(mut block) = larger_bucket.pop() {
+                if block.capacity() >= min_size {
+                    self.total_size -= block.capacity();
+                    block.clear();
+                    self.hits += 1;
+                    return block;
+                }
+                larger_bucket.push(block);
+            }
+        }
+
+        // No suitable block found, allocate new one with optimal size
+        self.misses += 1;
+        let optimal_size = match min_size {
+            0..=4096 => 4096,
+            4097..=16384 => 16384,
+            16385..=65536 => 65536,
+            _ => min_size.next_power_of_two(),
+        };
+        Vec::with_capacity(optimal_size)
     }
 
     fn return_block(&mut self, mut block: Vec<u8>) {
         if self.total_size + block.capacity() <= self.max_size {
             block.clear();
             self.total_size += block.capacity();
-            self.free_blocks.push(block);
+
+            let bucket = match block.capacity() {
+                0..=4096 => &mut self.small_blocks,
+                4097..=16384 => &mut self.medium_blocks,
+                16385..=65536 => &mut self.large_blocks,
+                _ => &mut self.xl_blocks,
+            };
+
+            // Limit bucket size to prevent excessive memory usage
+            if bucket.len() < 64 {
+                bucket.push(block);
+            }
         }
         // Otherwise, let it drop and be deallocated
+    }
+
+    fn get_stats(&self) -> (usize, usize, f64) {
+        let total_requests = self.hits + self.misses;
+        let hit_rate = if total_requests > 0 {
+            self.hits as f64 / total_requests as f64
+        } else {
+            0.0
+        };
+        (self.hits, self.misses, hit_rate)
     }
 }
 
@@ -390,9 +457,17 @@ impl BlockCache {
     pub fn get_memory_pool_stats(&self) -> HashMap<String, usize> {
         let pool = self.memory_pool.lock();
         let mut stats = HashMap::new();
-        stats.insert("free_blocks".to_string(), pool.free_blocks.len());
+        let total_blocks = pool.small_blocks.len()
+            + pool.medium_blocks.len()
+            + pool.large_blocks.len()
+            + pool.xl_blocks.len();
+        stats.insert("free_blocks".to_string(), total_blocks);
         stats.insert("total_size".to_string(), pool.total_size);
         stats.insert("max_size".to_string(), pool.max_size);
+        let (hits, misses, hit_rate) = pool.get_stats();
+        stats.insert("hits".to_string(), hits);
+        stats.insert("misses".to_string(), misses);
+        stats.insert("hit_rate_percent".to_string(), (hit_rate * 100.0) as usize);
         stats
     }
 
@@ -666,12 +741,20 @@ mod tests {
 
         // Return the block
         pool.return_block(block);
-        assert_eq!(pool.free_blocks.len(), 1);
+        let total_blocks = pool.small_blocks.len()
+            + pool.medium_blocks.len()
+            + pool.large_blocks.len()
+            + pool.xl_blocks.len();
+        assert_eq!(total_blocks, 1);
 
         // Get another block (should reuse)
         let block2 = pool.get_block(50);
         assert!(block2.capacity() >= 50);
-        assert_eq!(pool.free_blocks.len(), 0);
+        let total_blocks_after = pool.small_blocks.len()
+            + pool.medium_blocks.len()
+            + pool.large_blocks.len()
+            + pool.xl_blocks.len();
+        assert_eq!(total_blocks_after, 0);
     }
 
     #[test]

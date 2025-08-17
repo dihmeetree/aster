@@ -9,8 +9,13 @@ use std::fmt;
 pub struct VertexId(pub u64);
 
 impl VertexId {
+    /// Create a new vertex ID from a u64
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
     /// Create a new random vertex ID
-    pub fn new() -> Self {
+    pub fn random() -> Self {
         Self(rand::random())
     }
 
@@ -33,7 +38,7 @@ impl fmt::Display for VertexId {
 
 impl Default for VertexId {
     fn default() -> Self {
-        Self::new()
+        Self::random()
     }
 }
 
@@ -384,6 +389,36 @@ impl PolyLSMConfig {
         Ok(())
     }
 
+    /// Create a high-performance configuration
+    pub fn high_performance() -> Self {
+        Self {
+            level_size_ratio: 10,
+            max_levels: 4,
+            block_size: 4096,
+            bloom_filter_bits_per_key: 12, // More bloom filter bits for better performance
+            degree_sketch_bits_per_vertex: 8,
+            memtable_size: 128 * 1024 * 1024, // 128MB for better write throughput
+            compression_enabled: false,       // Disable compression for speed
+            lookup_ratio: 0.5,
+            average_degree: 32.0,
+        }
+    }
+
+    /// Create a low-memory configuration
+    pub fn low_memory() -> Self {
+        Self {
+            level_size_ratio: 10,
+            max_levels: 4,
+            block_size: 4096,
+            bloom_filter_bits_per_key: 8, // Fewer bloom filter bits to save memory
+            degree_sketch_bits_per_vertex: 8,
+            memtable_size: 16 * 1024 * 1024, // 16MB to reduce memory usage
+            compression_enabled: true,       // Enable compression to save space
+            lookup_ratio: 0.5,
+            average_degree: 32.0,
+        }
+    }
+
     /// Get a summary of paper-specified parameters
     pub fn paper_parameter_summary(&self) -> String {
         format!(
@@ -478,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_vertex_id() {
-        let id1 = VertexId::new();
+        let id1 = VertexId::random();
         let id2 = VertexId::from_u64(123);
 
         assert_eq!(id2.as_u64(), 123);
