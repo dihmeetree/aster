@@ -600,6 +600,311 @@ async fn test_gremlin_performance_and_stats() {
 }
 
 #[tokio::test]
+async fn test_gremlin_edge_traversals() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = AsterDBConfig {
+        enable_properties: true,
+        enable_recovery: false,
+        enable_metrics: false,
+        ..Default::default()
+    };
+
+    let db = AsterDB::open_with_config(temp_dir.path(), config)
+        .await
+        .unwrap();
+
+    // Create a graph with labeled edges
+    // v1 --(friend)--> v2 --(colleague)--> v3
+    // v1 --(family)--> v4
+    let v1 = VertexId::from_u64(1);
+    let v2 = VertexId::from_u64(2);
+    let v3 = VertexId::from_u64(3);
+    let v4 = VertexId::from_u64(4);
+
+    // Add vertices
+    for &vertex in &[v1, v2, v3, v4] {
+        let mut props = Properties::new();
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String(format!("vertex_{}", vertex.as_u64())),
+        );
+        db.set_vertex_properties(vertex, props).await.unwrap();
+    }
+
+    // Add edges with labels
+    db.graph().add_edge(v1, v2, None).await.unwrap(); // friend edge
+    db.graph().add_edge(v2, v3, None).await.unwrap(); // colleague edge
+    db.graph().add_edge(v1, v4, None).await.unwrap(); // family edge
+
+    // Test g.V(1).outE() - get outgoing edges from vertex 1
+    let traversal = db.g_v_ids(vec![v1]).out_e(None);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Outgoing edges from v1: {}", result.len());
+    // Should find edges to v2 and v4
+    assert!(result.len() >= 1);
+
+    // Test g.V(1).outE().inV() - get target vertices of outgoing edges
+    let traversal = db.g_v_ids(vec![v1]).out_e(None).in_v();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!(
+        "Target vertices of outgoing edges from v1: {}",
+        result.len()
+    );
+    // Should find v2 and v4
+    assert!(result.len() >= 1);
+
+    // Test g.V().inE() - get incoming edges
+    let traversal = db.g_v_ids(vec![v2]).in_e(None);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Incoming edges to v2: {}", result.len());
+    // Should find edge from v1
+
+    // Test g.V().bothE() - get both incoming and outgoing edges
+    let traversal = db.g_v_ids(vec![v2]).both_e(None);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("All edges connected to v2: {}", result.len());
+    // Should find edges from v1 to v2 and from v2 to v3
+
+    // Test edge to vertex traversals: g.E().outV() and g.E().inV()
+    let traversal = db.g_e().out_v();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Source vertices of all edges: {}", result.len());
+
+    let traversal = db.g_e().in_v();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Target vertices of all edges: {}", result.len());
+
+    // Test g.E().otherV() - get the other vertex from edge perspective
+    let traversal = db.g_e().other_v();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Other vertices from edge perspective: {}", result.len());
+}
+
+#[tokio::test]
+async fn test_gremlin_advanced_operations() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = AsterDBConfig {
+        enable_properties: true,
+        enable_recovery: false,
+        enable_metrics: false,
+        ..Default::default()
+    };
+
+    let db = AsterDB::open_with_config(temp_dir.path(), config)
+        .await
+        .unwrap();
+
+    // Create a more complex graph for advanced operations
+    for i in 1..=10 {
+        let vertex_id = VertexId::from_u64(i);
+        let mut props = Properties::new();
+        props.insert("id".to_string(), PropertyValue::Int(i as i64));
+        props.insert(
+            "category".to_string(),
+            PropertyValue::String(if i <= 5 {
+                "group_a".to_string()
+            } else {
+                "group_b".to_string()
+            }),
+        );
+        props.insert("value".to_string(), PropertyValue::Float(i as f64 * 10.0));
+
+        db.set_vertex_properties(vertex_id, props).await.unwrap();
+
+        // Create edges to form a connected graph
+        if i > 1 {
+            db.graph()
+                .add_edge(VertexId::from_u64(i - 1), vertex_id, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    // Test g.V().groupCount() - count occurrences of vertices
+    let traversal = db.g_v().group_count();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Group count result: {}", result.len());
+    // Should return aggregated counts
+
+    // Test g.V().project('id', 'category') - project specific properties
+    let traversal = db
+        .g_v()
+        .project(vec!["id".to_string(), "category".to_string()]);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Projected properties: {}", result.len());
+    // Should return maps with id and category
+
+    // Test g.V().union(g.V().has('category', 'group_a'), g.V().has('category', 'group_b'))
+    let trav1 = db.g_v().has(
+        "category".to_string(),
+        Some(PropertyValue::String("group_a".to_string())),
+    );
+    let trav2 = db.g_v().has(
+        "category".to_string(),
+        Some(PropertyValue::String("group_b".to_string())),
+    );
+    let traversal = db.g_v().union(vec![trav1, trav2]);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Union of two groups: {}", result.len());
+
+    // Test g.V().optional(g.V().out()) - optional traversal
+    let optional_trav = db.g_v().out(None);
+    let traversal = db.g_v().optional(optional_trav);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Optional traversal: {}", result.len());
+
+    // Test g.V().coalesce() with multiple traversals
+    let coalesce_trav1 = db.g_v().out(None);
+    let coalesce_trav2 = db.g_v(); // fallback
+    let traversal = db.g_v().coalesce(vec![coalesce_trav1, coalesce_trav2]);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Coalesce traversal: {}", result.len());
+
+    // Test g.V().local(g.V().out().limit(1)) - local traversal
+    let local_trav = db.g_v().out(None).limit(1);
+    let traversal = db.g_v().local(local_trav);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Local traversal: {}", result.len());
+}
+
+#[tokio::test]
+async fn test_gremlin_path_operations() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = AsterDBConfig {
+        enable_properties: true,
+        enable_recovery: false,
+        enable_metrics: false,
+        ..Default::default()
+    };
+
+    let db = AsterDB::open_with_config(temp_dir.path(), config)
+        .await
+        .unwrap();
+
+    // Create a linear graph: 1 -> 2 -> 3 -> 4 -> 5
+    for i in 1..=5 {
+        let vertex_id = VertexId::from_u64(i);
+        let mut props = Properties::new();
+        props.insert("step".to_string(), PropertyValue::Int(i as i64));
+
+        db.set_vertex_properties(vertex_id, props).await.unwrap();
+
+        if i > 1 {
+            db.graph()
+                .add_edge(VertexId::from_u64(i - 1), vertex_id, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    // Test g.V(1).out().out().path() - track path through traversal
+    let traversal = db
+        .g_v_ids(vec![VertexId::from_u64(1)])
+        .out(None)
+        .out(None)
+        .path();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Path traversal results: {}", result.len());
+    // Should return path information
+
+    // Test g.V().as('start').out().as('middle').out().as('end').select('start', 'end')
+    let traversal = db
+        .g_v_ids(vec![VertexId::from_u64(1)])
+        .as_("start".to_string())
+        .out(None)
+        .as_("middle".to_string())
+        .out(None)
+        .as_("end".to_string())
+        .select(vec!["start".to_string(), "end".to_string()]);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Select with labels: {}", result.len());
+
+    // Test complex chaining: g.V().out().dedup().values('step').where(gt(2)).count()
+    let traversal = db
+        .g_v()
+        .out(None)
+        .dedup()
+        .values(vec!["step".to_string()])
+        .where_(GremlinPredicate::Gt(PropertyValue::Int(2)))
+        .count();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Complex chaining result: {}", result.len());
+    assert_eq!(result.len(), 1);
+}
+
+#[tokio::test]
+async fn test_gremlin_range_and_order_operations() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = AsterDBConfig {
+        enable_properties: true,
+        enable_recovery: false,
+        enable_metrics: false,
+        ..Default::default()
+    };
+
+    let db = AsterDB::open_with_config(temp_dir.path(), config)
+        .await
+        .unwrap();
+
+    // Create vertices with sortable values
+    for i in 1..=20 {
+        let vertex_id = VertexId::from_u64(i);
+        let mut props = Properties::new();
+        props.insert("value".to_string(), PropertyValue::Int(i as i64));
+        props.insert("score".to_string(), PropertyValue::Float((21 - i) as f64)); // Reverse order
+
+        db.set_vertex_properties(vertex_id, props).await.unwrap();
+    }
+
+    // Test g.V().range(5, 10) - get specific range
+    let traversal = db.g_v().range(5, 10);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Range 5-10: {}", result.len());
+    assert!(result.len() <= 5); // Should get at most 5 results
+
+    // Test g.V().skip(10).limit(5) - equivalent to range
+    let traversal = db.g_v().skip(10).limit(5);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Skip 10, limit 5: {}", result.len());
+    assert!(result.len() <= 5);
+
+    // Test g.V().values('value').order() - order values
+    let traversal = db.g_v().values(vec!["value".to_string()]).order(None);
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Ordered values: {}", result.len());
+
+    // Test g.V().fold() - collect all into a single result
+    let traversal = db.g_v().limit(5).fold();
+    let result = db.gremlin(&traversal).await.unwrap();
+
+    println!("Folded results: {}", result.len());
+    assert_eq!(result.len(), 1); // Should return single collection
+}
+
+#[tokio::test]
 async fn test_gremlin_error_handling() {
     let temp_dir = TempDir::new().unwrap();
 

@@ -249,6 +249,36 @@ impl GremlinTraversal {
         self.step(GremlinStep::Both(labels))
     }
 
+    /// Get outgoing edges: g.V().outE()
+    pub fn out_e(self, labels: Option<Vec<String>>) -> Self {
+        self.step(GremlinStep::OutE(labels))
+    }
+
+    /// Get incoming edges: g.V().inE()
+    pub fn in_e(self, labels: Option<Vec<String>>) -> Self {
+        self.step(GremlinStep::InE(labels))
+    }
+
+    /// Get both outgoing and incoming edges: g.V().bothE()
+    pub fn both_e(self, labels: Option<Vec<String>>) -> Self {
+        self.step(GremlinStep::BothE(labels))
+    }
+
+    /// Get outgoing vertex from an edge: g.E().outV()
+    pub fn out_v(self) -> Self {
+        self.step(GremlinStep::OutV)
+    }
+
+    /// Get incoming vertex from an edge: g.E().inV()
+    pub fn in_v(self) -> Self {
+        self.step(GremlinStep::InV)
+    }
+
+    /// Get the other vertex from an edge: g.E().otherV()
+    pub fn other_v(self) -> Self {
+        self.step(GremlinStep::OtherV)
+    }
+
     pub fn has(self, key: String, value: Option<PropertyValue>) -> Self {
         self.step(GremlinStep::Has(key, value, None))
     }
@@ -279,6 +309,11 @@ impl GremlinTraversal {
 
     pub fn property_map(self, keys: Option<Vec<String>>) -> Self {
         self.step(GremlinStep::PropertyMap(keys))
+    }
+
+    /// Project specific properties: g.V().project('prop1', 'prop2')
+    pub fn project(self, properties: Vec<String>) -> Self {
+        self.step(GremlinStep::Project(properties))
     }
 
     pub fn as_(self, label: String) -> Self {
@@ -331,6 +366,11 @@ impl GremlinTraversal {
 
     pub fn fold(self) -> Self {
         self.step(GremlinStep::Fold)
+    }
+
+    /// Group count of results: g.V().groupCount()
+    pub fn group_count(self) -> Self {
+        self.step(GremlinStep::GroupCount)
     }
 
     pub fn path(self) -> Self {
