@@ -347,6 +347,9 @@ pub struct PolyLSMConfig {
     pub lookup_ratio: f64,
     /// Average degree of the graph
     pub average_degree: f64,
+    /// Enable 1-leveling LSM-tree extension (only L0 and L1 levels)
+    /// This optimizes for write-heavy workloads as mentioned in the Aster paper
+    pub enable_1_leveling: bool,
 }
 
 impl PolyLSMConfig {
@@ -360,8 +363,26 @@ impl PolyLSMConfig {
             degree_sketch_bits_per_vertex: 8, // I = 8 bits per vertex ID
             memtable_size: 64 * 1024 * 1024,  // 64MB
             compression_enabled: true,
-            lookup_ratio: 0.5,    // θ_L (can be adjusted based on workload)
-            average_degree: 32.0, // Average degree estimate
+            lookup_ratio: 0.5,        // θ_L (can be adjusted based on workload)
+            average_degree: 32.0,     // Average degree estimate
+            enable_1_leveling: false, // Standard multi-level by default
+        }
+    }
+
+    /// Create a configuration optimized for write-heavy workloads using 1-leveling
+    /// This implements the 1-leveling LSM-tree extension mentioned in the Aster paper
+    pub fn with_1_leveling() -> Self {
+        Self {
+            level_size_ratio: 10,             // T = 10 (size ratio between levels)
+            max_levels: 2,                    // Only L0 and L1 levels
+            block_size: 4096,                 // B = 4KB (block size)
+            bloom_filter_bits_per_key: 10,    // 10 bits per key as specified
+            degree_sketch_bits_per_vertex: 8, // I = 8 bits per vertex ID
+            memtable_size: 64 * 1024 * 1024,  // 64MB
+            compression_enabled: true,
+            lookup_ratio: 0.3,       // Lower lookup ratio for write-heavy workloads
+            average_degree: 32.0,    // Average degree estimate
+            enable_1_leveling: true, // Enable 1-leveling optimization
         }
     }
 
@@ -376,11 +397,20 @@ impl PolyLSMConfig {
             ));
         }
 
-        if self.max_levels != 4 {
-            errors.push(format!(
-                "L (max_levels) should be 4, got {}",
-                self.max_levels
-            ));
+        if self.enable_1_leveling {
+            if self.max_levels != 2 {
+                errors.push(format!(
+                    "L (max_levels) should be 2 for 1-leveling, got {}",
+                    self.max_levels
+                ));
+            }
+        } else {
+            if self.max_levels != 4 {
+                errors.push(format!(
+                    "L (max_levels) should be 4, got {}",
+                    self.max_levels
+                ));
+            }
         }
 
         if self.block_size != 4096 {
@@ -426,6 +456,7 @@ impl PolyLSMConfig {
             compression_enabled: false,       // Disable compression for speed
             lookup_ratio: 0.5,
             average_degree: 32.0,
+            enable_1_leveling: false, // Standard multi-level for performance
         }
     }
 
@@ -441,15 +472,22 @@ impl PolyLSMConfig {
             compression_enabled: true,       // Enable compression to save space
             lookup_ratio: 0.5,
             average_degree: 32.0,
+            enable_1_leveling: false, // Standard multi-level
         }
     }
 
     /// Get a summary of paper-specified parameters
     pub fn paper_parameter_summary(&self) -> String {
+        let leveling_info = if self.enable_1_leveling {
+            " (1-leveling)"
+        } else {
+            ""
+        };
         format!(
-            "Paper Parameters: T={}, L={}, B={}KB, I={} bits, Bloom={}bpk",
+            "Paper Parameters: T={}, L={}{}, B={}KB, I={} bits, Bloom={}bpk",
             self.level_size_ratio,
             self.max_levels,
+            leveling_info,
             self.block_size / 1024,
             self.degree_sketch_bits_per_vertex,
             self.bloom_filter_bits_per_key
@@ -534,6 +572,57 @@ mod tests {
         assert!(summary.contains("Bloom=10bpk"));
 
         println!("Parameter summary: {}", summary);
+    }
+
+    #[test]
+    fn test_1_leveling_configuration() {
+        let config = PolyLSMConfig::with_1_leveling();
+
+        // Verify 1-leveling configuration
+        assert!(config.enable_1_leveling, "1-leveling should be enabled");
+        assert_eq!(config.max_levels, 2, "1-leveling should have only 2 levels");
+        assert_eq!(
+            config.lookup_ratio, 0.3,
+            "1-leveling should have lower lookup ratio for write-heavy workloads"
+        );
+
+        // Verify other paper parameters still correct
+        assert_eq!(config.level_size_ratio, 10, "T should still be 10");
+        assert_eq!(config.block_size, 4096, "B should still be 4KB");
+        assert_eq!(
+            config.degree_sketch_bits_per_vertex, 8,
+            "I should still be 8 bits"
+        );
+
+        // Test validation
+        config.validate_paper_compliance().unwrap();
+
+        // Test summary
+        let summary = config.paper_parameter_summary();
+        assert!(
+            summary.contains("L=2 (1-leveling)"),
+            "Summary should indicate 1-leveling"
+        );
+
+        println!("1-leveling summary: {}", summary);
+    }
+
+    #[test]
+    fn test_1_leveling_validation() {
+        let mut config = PolyLSMConfig::with_1_leveling();
+
+        // Test invalid max_levels for 1-leveling
+        config.max_levels = 4;
+        let result = config.validate_paper_compliance();
+        assert!(
+            result.is_err(),
+            "Should fail validation with max_levels=4 when 1-leveling enabled"
+        );
+        assert!(result.unwrap_err().contains("should be 2 for 1-leveling"));
+
+        // Test valid configuration
+        config.max_levels = 2;
+        config.validate_paper_compliance().unwrap();
     }
 
     #[test]

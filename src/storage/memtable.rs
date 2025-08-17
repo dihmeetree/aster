@@ -2,7 +2,7 @@
 //!
 //! The MemTable buffers incoming writes in memory before flushing to disk as SSTables.
 
-use crate::{AsterError, Result, Timestamp, VertexId};
+use crate::{Result, Timestamp, VertexId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

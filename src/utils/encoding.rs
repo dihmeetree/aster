@@ -143,7 +143,34 @@ pub fn merge_encoded_neighbors(encoded1: &[u8], encoded2: &[u8]) -> Result<Vec<u
     Ok(encode_neighbors(&result))
 }
 
-/// Remove vertices from an encoded neighbor list
+/// Special marker value for deleted edges (using max u64 value)
+pub const EDGE_DELETION_MARKER: u64 = u64::MAX;
+
+/// Add deletion markers for specific edges in an encoded neighbor list
+/// This implements the Aster paper's approach of using special marker values
+/// instead of physically removing edges from neighbor lists
+pub fn add_edge_deletion_markers(encoded: &[u8], to_delete: &[VertexId]) -> Result<Vec<u8>> {
+    let mut neighbors = decode_neighbors(encoded)?;
+
+    // Add deletion markers for each edge to be deleted
+    for vertex_id in to_delete {
+        let deletion_marker = VertexId::from_u64(EDGE_DELETION_MARKER - vertex_id.as_u64());
+        neighbors.push(deletion_marker);
+    }
+
+    Ok(encode_neighbors(&neighbors))
+}
+
+/// Check if a vertex has a deletion marker in the neighbor list
+pub fn has_deletion_marker(encoded: &[u8], target: VertexId) -> Result<bool> {
+    let neighbors = decode_neighbors(encoded)?;
+    let deletion_marker = EDGE_DELETION_MARKER - target.as_u64();
+
+    Ok(neighbors.iter().any(|v| v.as_u64() == deletion_marker))
+}
+
+/// Remove vertices from an encoded neighbor list (legacy implementation)
+/// Note: This is kept for backward compatibility but new code should use deletion markers
 pub fn remove_from_encoded_neighbors(encoded: &[u8], to_remove: &[VertexId]) -> Result<Vec<u8>> {
     let mut neighbors = decode_neighbors(encoded)?;
     let remove_set: BTreeSet<u64> = to_remove.iter().map(|v| v.as_u64()).collect();
@@ -152,8 +179,41 @@ pub fn remove_from_encoded_neighbors(encoded: &[u8], to_remove: &[VertexId]) -> 
     Ok(encode_neighbors(&neighbors))
 }
 
-/// Check if a vertex exists in an encoded neighbor list (binary search)
+/// Get active neighbors from an encoded list, filtering out deleted edges
+/// This checks for deletion markers and excludes deleted edges from results
+pub fn get_active_neighbors(encoded: &[u8]) -> Result<Vec<VertexId>> {
+    let all_neighbors = decode_neighbors(encoded)?;
+    let mut active_neighbors = Vec::new();
+    let mut deleted_vertices = BTreeSet::new();
+
+    // First pass: identify deletion markers
+    for neighbor in &all_neighbors {
+        let neighbor_id = neighbor.as_u64();
+        if neighbor_id > EDGE_DELETION_MARKER / 2 {
+            // This is a deletion marker
+            let deleted_vertex_id = EDGE_DELETION_MARKER - neighbor_id;
+            deleted_vertices.insert(deleted_vertex_id);
+        }
+    }
+
+    // Second pass: collect active neighbors (excluding deleted ones)
+    for neighbor in &all_neighbors {
+        let neighbor_id = neighbor.as_u64();
+        if neighbor_id <= EDGE_DELETION_MARKER / 2 && !deleted_vertices.contains(&neighbor_id) {
+            active_neighbors.push(*neighbor);
+        }
+    }
+
+    Ok(active_neighbors)
+}
+
+/// Check if a vertex exists in an encoded neighbor list (respects deletion markers)
 pub fn contains_neighbor(encoded: &[u8], target: VertexId) -> Result<bool> {
+    // Check if the edge has been deleted using deletion markers
+    if has_deletion_marker(encoded, target)? {
+        return Ok(false);
+    }
+
     let neighbors = decode_neighbors(encoded)?;
     let target_id = target.as_u64();
 
@@ -571,5 +631,80 @@ mod tests {
         assert_eq!(stats.original_size_bytes, 32); // 4 * 8 bytes
         assert_eq!(stats.encoding_type, "Partitioned Elias-Fano");
         assert!(stats.compression_ratio > 0.0);
+    }
+
+    #[test]
+    fn test_edge_deletion_markers() {
+        let neighbors = vec![
+            VertexId::from_u64(10),
+            VertexId::from_u64(20),
+            VertexId::from_u64(30),
+            VertexId::from_u64(40),
+        ];
+
+        let encoded = encode_neighbors(&neighbors);
+
+        // Test adding deletion markers
+        let to_delete = vec![VertexId::from_u64(20), VertexId::from_u64(40)];
+        let encoded_with_deletions = add_edge_deletion_markers(&encoded, &to_delete).unwrap();
+
+        // Test that deletion markers are detected
+        assert!(has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(20)).unwrap());
+        assert!(has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(40)).unwrap());
+        assert!(!has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(10)).unwrap());
+        assert!(!has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(30)).unwrap());
+
+        // Test that contains_neighbor respects deletion markers
+        assert!(contains_neighbor(&encoded_with_deletions, VertexId::from_u64(10)).unwrap());
+        assert!(!contains_neighbor(&encoded_with_deletions, VertexId::from_u64(20)).unwrap()); // Deleted
+        assert!(contains_neighbor(&encoded_with_deletions, VertexId::from_u64(30)).unwrap());
+        assert!(!contains_neighbor(&encoded_with_deletions, VertexId::from_u64(40)).unwrap()); // Deleted
+
+        // Test get_active_neighbors
+        let active = get_active_neighbors(&encoded_with_deletions).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.contains(&VertexId::from_u64(10)));
+        assert!(active.contains(&VertexId::from_u64(30)));
+        assert!(!active.contains(&VertexId::from_u64(20)));
+        assert!(!active.contains(&VertexId::from_u64(40)));
+    }
+
+    #[test]
+    fn test_edge_deletion_markers_empty_list() {
+        let neighbors = vec![];
+        let encoded = encode_neighbors(&neighbors);
+
+        let to_delete = vec![VertexId::from_u64(20)];
+        let encoded_with_deletions = add_edge_deletion_markers(&encoded, &to_delete).unwrap();
+
+        // Should have deletion marker even in empty list
+        assert!(has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(20)).unwrap());
+
+        let active = get_active_neighbors(&encoded_with_deletions).unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    fn test_edge_deletion_markers_large_ids() {
+        // Test with large vertex IDs to ensure deletion marker calculation works correctly
+        let neighbors = vec![
+            VertexId::from_u64(1000000000),
+            VertexId::from_u64(2000000000),
+        ];
+
+        let encoded = encode_neighbors(&neighbors);
+        let to_delete = vec![VertexId::from_u64(1000000000)];
+        let encoded_with_deletions = add_edge_deletion_markers(&encoded, &to_delete).unwrap();
+
+        assert!(
+            has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(1000000000)).unwrap()
+        );
+        assert!(
+            !has_deletion_marker(&encoded_with_deletions, VertexId::from_u64(2000000000)).unwrap()
+        );
+
+        let active = get_active_neighbors(&encoded_with_deletions).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0], VertexId::from_u64(2000000000));
     }
 }

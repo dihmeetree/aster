@@ -66,6 +66,13 @@ impl Graph {
         Ok(edge)
     }
 
+    /// Delete an edge between two vertices using deletion markers
+    /// This implements the Aster paper's approach of using special marker values
+    /// instead of physically removing edges from neighbor lists
+    pub async fn delete_edge(&self, source: VertexId, target: VertexId) -> Result<()> {
+        self.storage.delete_edge(source, target).await
+    }
+
     /// Get neighbors of a vertex
     pub async fn get_neighbors(&self, vertex_id: VertexId) -> Result<Vec<VertexId>> {
         self.storage.get_neighbors(vertex_id).await

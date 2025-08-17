@@ -9,7 +9,10 @@ use crate::storage::{
 };
 use crate::types::PolyLSMConfig;
 use crate::utils::{
-    encoding::{decode_neighbors, encode_neighbors, merge_encoded_neighbors},
+    encoding::{
+        add_edge_deletion_markers, decode_neighbors, encode_neighbors, get_active_neighbors,
+        merge_encoded_neighbors,
+    },
     DegreeSketch,
 };
 use crate::{AsterError, Result, Timestamp, VertexId};
@@ -19,7 +22,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc as StdArc;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -146,7 +148,9 @@ impl PolyLSM {
         // Create directory if it doesn't exist
         fs::create_dir_all(&data_dir)?;
 
-        // Initialize levels according to paper specification (L=4)
+        // Initialize levels according to configuration
+        // For 1-leveling: L=2 (L0 and L1 only) for write-optimized workloads
+        // For standard: L=4 as specified in paper
         let mut levels = Vec::with_capacity(config.max_levels as usize);
         let mut current_max_size = 64 * 1024 * 1024; // Start with 64MB for L1
 
@@ -291,6 +295,70 @@ impl PolyLSM {
         }
 
         Ok(())
+    }
+
+    /// Delete an edge using deletion markers as specified in the Aster paper
+    /// This adds a special deletion marker rather than physically removing the edge
+    pub async fn delete_edge(&self, source: VertexId, target: VertexId) -> Result<()> {
+        // Acquire exclusive access using lock-free coordination
+        let _guard = self.acquire_vertex_exclusive(source).await?;
+
+        // Get current neighbor list
+        let current_encoded = self.get_encoded_neighbors(source).await?;
+
+        // Add deletion marker for the target vertex
+        let to_delete = vec![target];
+        let encoded_with_deletion = add_edge_deletion_markers(&current_encoded, &to_delete)?;
+
+        // Create delta entry with deletion marker
+        let entry = MemTableEntry::new_delta(encoded_with_deletion, Timestamp::now());
+
+        self.insert_entry(source, entry).await?;
+
+        // Note: We don't decrement degree sketch here as deletion markers preserve
+        // the original degree for cost model calculations as per the paper
+
+        Ok(())
+    }
+
+    /// Get encoded neighbors for a vertex (for internal use)
+    async fn get_encoded_neighbors(&self, vertex_id: VertexId) -> Result<Vec<u8>> {
+        // Check active MemTable first
+        {
+            let memtable = self.active_memtable.read();
+            if let Some(entry) = memtable.get_latest(vertex_id) {
+                if !entry.is_tombstone() {
+                    return Ok(entry.data);
+                }
+            }
+        }
+
+        // Check immutable MemTables
+        {
+            let immutable = self.immutable_memtables.read();
+            for memtable in immutable.iter() {
+                if let Some(entry) = memtable.get_latest(vertex_id) {
+                    if !entry.is_tombstone() {
+                        return Ok(entry.data);
+                    }
+                }
+            }
+        }
+
+        // Check SSTables in levels
+        {
+            let levels = self.levels.read();
+            for level in levels.iter() {
+                for sstable in &level.sstables {
+                    if let Ok(Some(entry)) = sstable.get(vertex_id).await {
+                        return Ok(entry.data);
+                    }
+                }
+            }
+        }
+
+        // Return empty encoded neighbor list if vertex not found
+        Ok(encode_neighbors(&[]))
     }
 
     /// Acquire exclusive access to a vertex using lock-free CAS operations
@@ -611,13 +679,13 @@ impl PolyLSM {
         for entry in entries {
             match entry.entry_type {
                 EntryType::Pivot => {
-                    // Pivot entry replaces all current neighbors
-                    current_neighbors = decode_neighbors(&entry.data)?;
+                    // Pivot entry replaces all current neighbors (respecting deletion markers)
+                    current_neighbors = get_active_neighbors(&entry.data)?;
                     break; // Pivot is authoritative, stop processing
                 }
                 EntryType::Delta => {
-                    // Delta entry adds to current neighbors
-                    let delta_neighbors = decode_neighbors(&entry.data)?;
+                    // Delta entry adds to current neighbors (respecting deletion markers)
+                    let delta_neighbors = get_active_neighbors(&entry.data)?;
                     current_neighbors.extend(delta_neighbors);
                 }
                 EntryType::Tombstone => {
@@ -928,6 +996,23 @@ impl PolyLSM {
     pub fn maintain_vertex_registry(&self) {
         // Cleanup inactive vertex states every hour
         self.vertex_operations.cleanup_inactive(3600);
+    }
+
+    /// Get storage configuration information
+    pub fn get_config_info(&self) -> String {
+        let levels = self.levels.read();
+        let level_info = if self.config.enable_1_leveling {
+            "1-leveling (L0 + L1 only, write-optimized)"
+        } else {
+            "Standard multi-level (read-optimized)"
+        };
+
+        format!(
+            "Poly-LSM Configuration:\n  - Strategy: {}\n  - Levels: {}\n  - {}",
+            level_info,
+            levels.len(),
+            self.config.paper_parameter_summary()
+        )
     }
 
     /// Get lock-free registry statistics
