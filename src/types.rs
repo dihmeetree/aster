@@ -25,6 +25,15 @@ impl VertexId {
         Self(id)
     }
 
+    /// Create a vertex ID from a string representation
+    pub fn from_string(s: &str) -> Option<Self> {
+        if let Some(stripped) = s.strip_prefix('v') {
+            stripped.parse::<u64>().ok().map(Self)
+        } else {
+            s.parse::<u64>().ok().map(Self)
+        }
+    }
+
     /// Get the underlying u64 value
     pub fn as_u64(&self) -> u64 {
         self.0

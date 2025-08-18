@@ -29,6 +29,13 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = "4.0"
 tempfile = "3.0"
+# Server dependencies
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.0"
+askama = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -46,3 +53,11 @@ harness = false
 [[bin]]
 name = "aster-bench"
 path = "examples/benchmark_runner.rs"
+
+[[bin]]
+name = "aster-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "twitter-example"
+path = "examples/twitter/main.rs"

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Twitter Clone</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #000;
+            color: #fff;
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .login-container {
+            background-color: #16181c;
+            border: 1px solid #2f3336;
+            border-radius: 15px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        
+        .logo {
+            font-size: 48px;
+            margin-bottom: 30px;
+            color: #1d9bf0;
+        }
+        
+        .login-title {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 30px;
+        }
+        
+        .login-subtitle {
+            color: #536471;
+            margin-bottom: 30px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #fff;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 15px;
+            background-color: #000;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #1d9bf0;
+        }
+        
+        .form-group input::placeholder {
+            color: #536471;
+        }
+        
+        .btn {
+            background-color: #1d9bf0;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s;
+        }
+        
+        .btn:hover {
+            background-color: #1a8cd8;
+        }
+        
+        .error {
+            background-color: #ff4444;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        
+        .note {
+            color: #536471;
+            font-size: 14px;
+            margin-top: 20px;
+            line-height: 1.4;
+        }
+        
+        .home-link {
+            color: #1d9bf0;
+            text-decoration: none;
+            margin-top: 20px;
+            display: inline-block;
+        }
+        
+        .home-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">🐦</div>
+        <h1 class="login-title">Welcome to Twitter Clone</h1>
+        <p class="login-subtitle">Sign in to see what's happening</p>
+        
+        {% if error != "" %}
+            <div class="error">{{ error }}</div>
+        {% endif %}
+        
+        <form action="/login" method="post">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input 
+                    type="text" 
+                    id="username" 
+                    name="username" 
+                    placeholder="Enter your username" 
+                    required
+                    autofocus
+                >
+            </div>
+            
+            <button type="submit" class="btn">Sign in</button>
+        </form>
+        
+        <p class="note">
+            <strong>Demo Mode:</strong> Enter any username to login. If the user doesn't exist, 
+            a new account will be created automatically.
+        </p>
+        
+        <a href="/" class="home-link">← Back to Home</a>
+    </div>
+</body>
+</html>

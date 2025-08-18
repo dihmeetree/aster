@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Post by {{ author.display_name }} - Twitter Clone</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #000;
+            color: #fff;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 275px 1fr 350px;
+            gap: 20px;
+            min-height: 100vh;
+        }
+        
+        .sidebar {
+            padding: 20px;
+            border-right: 1px solid #2f3336;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+        }
+        
+        .main-content {
+            padding: 20px;
+            border-right: 1px solid #2f3336;
+        }
+        
+        .right-sidebar {
+            padding: 20px;
+        }
+        
+        .logo {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 30px;
+            color: #1d9bf0;
+        }
+        
+        .nav-menu {
+            list-style: none;
+        }
+        
+        .nav-menu li {
+            margin-bottom: 15px;
+        }
+        
+        .nav-menu a {
+            color: #fff;
+            text-decoration: none;
+            font-size: 20px;
+            padding: 12px 20px;
+            border-radius: 25px;
+            display: block;
+            transition: background-color 0.2s;
+        }
+        
+        .nav-menu a:hover {
+            background-color: #1a1a1a;
+        }
+        
+        .btn {
+            background-color: #1d9bf0;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: background-color 0.2s;
+        }
+        
+        .btn:hover {
+            background-color: #1a8cd8;
+        }
+        
+        .btn-secondary {
+            background-color: transparent;
+            border: 1px solid #536471;
+            color: #fff;
+        }
+        
+        .btn-secondary:hover {
+            background-color: #1a1a1a;
+        }
+        
+        .post {
+            background-color: #16181c;
+            border: 1px solid #2f3336;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .post-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .post-author {
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        
+        .post-username {
+            color: #536471;
+            margin-right: 8px;
+        }
+        
+        .post-time {
+            color: #536471;
+            font-size: 14px;
+        }
+        
+        .post-content {
+            margin-bottom: 20px;
+            font-size: 18px;
+            line-height: 1.5;
+        }
+        
+        .post-actions {
+            display: flex;
+            gap: 20px;
+            padding: 15px 0;
+            border-top: 1px solid #2f3336;
+        }
+        
+        .post-action {
+            color: #536471;
+            text-decoration: none;
+            font-size: 16px;
+            padding: 8px 12px;
+            border-radius: 15px;
+            transition: background-color 0.2s;
+        }
+        
+        .post-action:hover {
+            background-color: #1a1a1a;
+        }
+        
+        .post-action.liked {
+            color: #f91880;
+        }
+        
+        .comment-form {
+            background-color: #16181c;
+            border: 1px solid #2f3336;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .comment-form textarea {
+            width: 100%;
+            background-color: transparent;
+            border: none;
+            color: #fff;
+            font-size: 16px;
+            resize: none;
+            min-height: 80px;
+            outline: none;
+        }
+        
+        .comment-form textarea::placeholder {
+            color: #536471;
+        }
+        
+        .comment {
+            background-color: #0d1117;
+            border: 1px solid #2f3336;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .comment-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .comment-author {
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        
+        .comment-username {
+            color: #536471;
+            margin-right: 8px;
+        }
+        
+        .comment-time {
+            color: #536471;
+            font-size: 14px;
+        }
+        
+        .comment-content {
+            font-size: 15px;
+            margin-bottom: 8px;
+        }
+        
+        .comment-actions {
+            display: flex;
+            gap: 15px;
+        }
+        
+        .comment-action {
+            color: #536471;
+            text-decoration: none;
+            font-size: 13px;
+            padding: 4px 8px;
+            border-radius: 10px;
+            transition: background-color 0.2s;
+        }
+        
+        .comment-action:hover {
+            background-color: #1a1a1a;
+        }
+        
+        .comment-action.liked {
+            color: #f91880;
+        }
+        
+        .back-link {
+            color: #1d9bf0;
+            text-decoration: none;
+            font-size: 16px;
+            margin-bottom: 20px;
+            display: inline-block;
+        }
+        
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+            
+            .sidebar, .right-sidebar {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Left Sidebar -->
+        <div class="sidebar">
+            <div class="logo">🐦 Twitter</div>
+            <nav>
+                <ul class="nav-menu">
+                    <li><a href="/">Home</a></li>
+                    {% if is_logged_in %}
+                        <li><a href="/profile/{{ current_username }}">Profile</a></li>
+                        <li><a href="/logout">Logout</a></li>
+                    {% else %}
+                        <li><a href="/login">Login</a></li>
+                    {% endif %}
+                </ul>
+            </nav>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <a href="/" class="back-link">← Back to Home</a>
+            
+            <!-- Main Post -->
+            <div class="post">
+                <div class="post-header">
+                    <div class="post-author">
+                        <a href="/profile/{{ author.username }}" style="color: #fff; text-decoration: none;">
+                            {{ author.display_name }}
+                        </a>
+                    </div>
+                    <div class="post-username">@{{ author.username }}</div>
+                    <div class="post-time">{{ post.created_at.format("%Y-%m-%d %H:%M") }}</div>
+                </div>
+                <div class="post-content">{{ post.content }}</div>
+                <div class="post-actions">
+                    <span class="post-action">
+                        💬 {{ post.comment_count }}
+                    </span>
+                    {% if is_logged_in %}
+                        <a href="/like/{{ post.id }}" class="post-action {% if user_liked %}liked{% endif %}">
+                            {% if user_liked %}❤️{% else %}🤍{% endif %} {{ post.like_count }}
+                        </a>
+                    {% else %}
+                        <span class="post-action">
+                            🤍 {{ post.like_count }}
+                        </span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Comment Form -->
+            {% if is_logged_in %}
+                <form class="comment-form" action="/comment" method="post">
+                    <input type="hidden" name="post_id" value="{{ post.id }}">
+                    <textarea name="content" placeholder="Tweet your reply" required></textarea>
+                    <div style="text-align: right; margin-top: 15px;">
+                        <button type="submit" class="btn">Reply</button>
+                    </div>
+                </form>
+            {% endif %}
+
+            <!-- Comments -->
+            <h2 style="margin-bottom: 20px;">Comments</h2>
+            
+            {% if comments.is_empty() %}
+                <div class="comment">
+                    <div class="comment-content">
+                        No comments yet. 
+                        {% if is_logged_in %}
+                            Be the first to reply!
+                        {% else %}
+                            <a href="/login" style="color: #1d9bf0;">Login</a> to join the conversation.
+                        {% endif %}
+                    </div>
+                </div>
+            {% else %}
+                {% for comment_with_author in comments %}
+                    <div class="comment">
+                        <div class="comment-header">
+                            <div class="comment-author">
+                                <a href="/profile/{{ comment_with_author.author.username }}" style="color: #fff; text-decoration: none;">
+                                    {{ comment_with_author.author.display_name }}
+                                </a>
+                            </div>
+                            <div class="comment-username">@{{ comment_with_author.author.username }}</div>
+                            <div class="comment-time">{{ comment_with_author.comment.created_at.format("%Y-%m-%d %H:%M") }}</div>
+                        </div>
+                        <div class="comment-content">{{ comment_with_author.comment.content }}</div>
+                        <div class="comment-actions">
+                            {% if is_logged_in %}
+                                <a href="/like/{{ comment_with_author.comment.id }}" class="comment-action {% if comment_with_author.user_liked %}liked{% endif %}">
+                                    {% if comment_with_author.user_liked %}❤️{% else %}🤍{% endif %} {{ comment_with_author.comment.like_count }}
+                                </a>
+                            {% else %}
+                                <span class="comment-action">
+                                    🤍 {{ comment_with_author.comment.like_count }}
+                                </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        </div>
+
+        <!-- Right Sidebar -->
+        <div class="right-sidebar">
+            <!-- Additional post info could go here -->
+        </div>
+    </div>
+</body>
+</html>

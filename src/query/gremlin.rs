@@ -677,7 +677,7 @@ impl GremlinEngine {
         traversal: &'a GremlinTraversal,
         context: &'a mut GremlinContext,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(Vec<GremlinResult>, QueryStats)>> + 'a>,
+        Box<dyn std::future::Future<Output = Result<(Vec<GremlinResult>, QueryStats)>> + Send + 'a>,
     > {
         Box::pin(async move {
             let mut stats = QueryStats::default();
@@ -1880,7 +1880,7 @@ impl GremlinEngine {
         result: &'a GremlinResult,
         predicate: &'a GremlinPredicate,
         context: &'a GremlinContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>> {
         Box::pin(async move {
             match predicate {
                 GremlinPredicate::Eq(value) => {

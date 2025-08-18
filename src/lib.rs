@@ -17,6 +17,7 @@ pub mod graph;
 pub mod metrics;
 pub mod query;
 pub mod recovery;
+pub mod server;
 pub mod storage;
 pub mod transaction;
 pub mod types;
@@ -33,6 +34,7 @@ pub use query::{
     RangeQueryResult, RangeScanOptimizer,
 };
 pub use recovery::{RecoveryConfig, RecoveryManager, RecoveryStats};
+pub use server::{AsterServer, ServerConfig};
 pub use storage::{PolyLSM, PropertyStore, PropertyStoreConfig};
 pub use transaction::{
     ConflictResolution, LockResource, LockType, Transaction, TransactionConfig, TransactionId,

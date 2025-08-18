@@ -343,14 +343,20 @@ impl PolyLSM {
         }
 
         // Check SSTables in levels
-        {
+        let sstables_to_check = {
             let levels = self.levels.read();
+            let mut sstables = Vec::new();
             for level in levels.iter() {
                 for sstable in &level.sstables {
-                    if let Ok(Some(entry)) = sstable.get(vertex_id).await {
-                        return Ok(entry.data);
-                    }
+                    sstables.push(sstable.clone());
                 }
+            }
+            sstables
+        };
+
+        for sstable in sstables_to_check {
+            if let Ok(Some(entry)) = sstable.get(vertex_id).await {
+                return Ok(entry.data);
             }
         }
 
@@ -366,15 +372,15 @@ impl PolyLSM {
     /// Insert an entry into the active MemTable
     async fn insert_entry(&self, vertex_id: VertexId, entry: MemTableEntry) -> Result<()> {
         // Insert into active MemTable
-        {
+        let needs_rotation = {
             let memtable = self.active_memtable.read();
             memtable.insert(vertex_id, entry)?;
+            memtable.is_full()
+        };
 
-            // Check if MemTable needs flushing
-            if memtable.is_full() {
-                drop(memtable); // Release read lock
-                self.rotate_memtable().await?;
-            }
+        // Check if MemTable needs flushing
+        if needs_rotation {
+            self.rotate_memtable().await?;
         }
 
         Ok(())
@@ -479,16 +485,18 @@ impl PolyLSM {
 
     /// Check if compaction is needed and trigger it with parallel processing
     async fn maybe_trigger_compaction(&self) -> Result<()> {
-        let levels = self.levels.read();
-        let mut compaction_candidates = Vec::new();
+        let compaction_candidates = {
+            let levels = self.levels.read();
+            let mut compaction_candidates = Vec::new();
 
-        // Identify all levels that need compaction
-        for (i, level) in levels.iter().enumerate() {
-            if level.needs_compaction() && i + 1 < levels.len() {
-                compaction_candidates.push(i as u32);
+            // Identify all levels that need compaction
+            for (i, level) in levels.iter().enumerate() {
+                if level.needs_compaction() && i + 1 < levels.len() {
+                    compaction_candidates.push(i as u32);
+                }
             }
-        }
-        drop(levels); // Release read lock early
+            compaction_candidates
+        };
 
         // Process compaction candidates in parallel, respecting semaphore limits
         let mut compaction_tasks = Vec::new();
@@ -829,17 +837,26 @@ impl PolyLSM {
         }
 
         // Check all levels' SSTables
-        let levels = self.levels.read();
-        for level in levels.iter() {
-            for sstable in &level.sstables {
-                // Quick check if this SSTable might contain data in our range
-                let metadata = sstable.metadata();
-                if metadata.last_key.as_u64() >= start_u64 && metadata.first_key.as_u64() <= end_u64
-                {
-                    let sstable_results = sstable.range(start, end).await?;
-                    results.extend(sstable_results);
+        let sstables_to_check = {
+            let levels = self.levels.read();
+            let mut sstables_to_check = Vec::new();
+            for level in levels.iter() {
+                for sstable in &level.sstables {
+                    // Quick check if this SSTable might contain data in our range
+                    let metadata = sstable.metadata();
+                    if metadata.last_key.as_u64() >= start_u64
+                        && metadata.first_key.as_u64() <= end_u64
+                    {
+                        sstables_to_check.push(sstable.clone());
+                    }
                 }
             }
+            sstables_to_check
+        };
+
+        for sstable in sstables_to_check {
+            let sstable_results = sstable.range(start, end).await?;
+            results.extend(sstable_results);
         }
 
         // Sort by vertex ID and deduplicate, keeping the newest entry for each vertex
@@ -893,14 +910,20 @@ impl PolyLSM {
         }
 
         // Check all SSTables across all levels
-        {
+        let sstables_to_check = {
             let levels = self.levels.read();
+            let mut sstables = Vec::new();
             for level in levels.iter() {
                 for sstable in level.sstables.iter() {
-                    if let Ok(Some(entry)) = sstable.get(vertex_id).await {
-                        all_versions.push(entry);
-                    }
+                    sstables.push(sstable.clone());
                 }
+            }
+            sstables
+        };
+
+        for sstable in sstables_to_check {
+            if let Ok(Some(entry)) = sstable.get(vertex_id).await {
+                all_versions.push(entry);
             }
         }
 
@@ -1084,12 +1107,19 @@ struct AtomicVertexState {
     last_access: AtomicU64,
 }
 
+// Explicitly implement Send and Sync since all fields are atomic
+unsafe impl Send for AtomicVertexState {}
+unsafe impl Sync for AtomicVertexState {}
+
 /// RAII guard for vertex exclusive access
 pub struct VertexGuard {
     vertex_id: VertexId,
     operation_id: u64,
     registry: std::sync::Weak<LockFreeVertexRegistry>,
 }
+
+// VertexGuard is Send since all its fields are Send
+unsafe impl Send for VertexGuard {}
 
 impl LockFreeVertexRegistry {
     /// Create a new lock-free vertex registry
@@ -1128,9 +1158,11 @@ impl LockFreeVertexRegistry {
 
         // Attempt to acquire exclusive access using CAS operations
         let max_retries = 100;
+        let mut current_vertex_state = vertex_state;
+
         for retry in 0..max_retries {
             // Try to acquire exclusive access
-            match vertex_state.operation_id.compare_exchange_weak(
+            match current_vertex_state.operation_id.compare_exchange_weak(
                 0,
                 operation_id,
                 Ordering::SeqCst,
@@ -1138,7 +1170,7 @@ impl LockFreeVertexRegistry {
             ) {
                 Ok(_) => {
                     // Successfully acquired exclusive access
-                    vertex_state
+                    current_vertex_state
                         .last_access
                         .store(current_time, Ordering::Relaxed);
                     self.total_acquisitions.fetch_add(1, Ordering::Relaxed);
@@ -1152,17 +1184,36 @@ impl LockFreeVertexRegistry {
                 Err(_current_operation) => {
                     // Access is currently held by another operation
                     self.contention_events.fetch_add(1, Ordering::Relaxed);
-                    vertex_state.wait_count.fetch_add(1, Ordering::Relaxed);
+                    current_vertex_state
+                        .wait_count
+                        .fetch_add(1, Ordering::Relaxed);
 
-                    // Exponential backoff with jitter to reduce contention
+                    // Calculate delay without holding references across await
                     let base_delay =
                         std::time::Duration::from_micros(1 << std::cmp::min(retry, 10));
                     let jitter = std::time::Duration::from_micros(
                         (operation_id % 100) * 10, // Simple jitter based on operation ID
                     );
-                    tokio::time::sleep(base_delay + jitter).await;
+                    let delay = base_delay + jitter;
 
-                    vertex_state.wait_count.fetch_sub(1, Ordering::Relaxed);
+                    // Store the vertex state reference for later use
+                    let vertex_state_for_decrement = current_vertex_state.clone();
+
+                    // Sleep without holding any references
+                    tokio::time::sleep(delay).await;
+
+                    vertex_state_for_decrement
+                        .wait_count
+                        .fetch_sub(1, Ordering::Relaxed);
+
+                    // Re-acquire the reference for the next iteration
+                    current_vertex_state = {
+                        let states = self.vertex_states.read();
+                        states
+                            .get(&vertex_id)
+                            .cloned()
+                            .expect("Vertex state should exist as we just accessed it")
+                    };
                 }
             }
         }
