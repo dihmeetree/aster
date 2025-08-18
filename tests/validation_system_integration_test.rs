@@ -43,12 +43,9 @@ async fn test_cost_model_validation_framework() -> Result<()> {
     // Run full validation suite
     validator.validate_all_equations()?;
 
-    // Export results for analysis to verify tests ran
-    let results_path = "test_validation_results.csv";
-    validator.export_results(results_path)?;
+    // Note: CSV export removed as requested - test validation occurs internally
 
     println!("✓ Cost model validation framework test completed");
-    println!("  Results exported to: {}", results_path);
 
     Ok(())
 }
