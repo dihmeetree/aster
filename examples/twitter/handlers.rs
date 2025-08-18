@@ -364,7 +364,7 @@ pub async fn create_post(
     })?;
 
     info!("Created post: {}", post.id);
-    Ok(Redirect::to("/"))
+    Ok(Redirect::to(&format!("/post/{}", post.id)))
 }
 
 pub async fn like_post(

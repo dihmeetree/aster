@@ -3,7 +3,7 @@ use aster_db::{
     query::GremlinResult, AsterDB, AsterDBConfig, GremlinTraversal, PropertyValue, Result, VertexId,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct TwitterDatabase {
