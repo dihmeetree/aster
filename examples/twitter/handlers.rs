@@ -140,14 +140,17 @@ pub async fn profile(
         (db.current_user_id, db.clone())
     };
 
-    let profile_user = db_clone
-        .get_user_by_username(&username)
+    // Use combined query to reduce database round trips
+    let profile_data = db_clone
+        .get_profile_data(&username, current_user_id)
         .await
         .map_err(|e| {
-            error!("Failed to get user by username: {}", e);
+            error!("Failed to get profile data: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (profile_user, posts, following, followed_by) = profile_data;
 
     let current_user = if let Some(user_id) = current_user_id {
         db_clone.get_user_by_id(user_id).await.map_err(|e| {
@@ -156,29 +159,6 @@ pub async fn profile(
         })?
     } else {
         None
-    };
-
-    let limit = params.limit.unwrap_or(20);
-    let posts = db_clone
-        .get_user_posts(profile_user.id, limit)
-        .await
-        .map_err(|e| {
-            error!("Failed to get user posts: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let (following, followed_by) = if let Some(current_user_id) = current_user_id {
-        let following = db_clone
-            .check_if_following(current_user_id, profile_user.id)
-            .await
-            .unwrap_or(false);
-        let followed_by = db_clone
-            .check_if_following(profile_user.id, current_user_id)
-            .await
-            .unwrap_or(false);
-        (following, followed_by)
-    } else {
-        (false, false)
     };
 
     let (is_logged_in, current_username) = match &current_user {

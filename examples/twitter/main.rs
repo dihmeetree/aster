@@ -3,6 +3,7 @@ mod handlers;
 mod models;
 mod seeder;
 
+use aster_db::{AsterDB, AsterDBConfig};
 use axum::{
     http::StatusCode,
     response::Html,
@@ -11,7 +12,7 @@ use axum::{
 };
 use database::TwitterDatabase;
 use handlers::*;
-use seeder::Seeder;
+use seeder::{DatabaseSeeder, SeedConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;
@@ -33,17 +34,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = "./twitter_data";
     std::fs::create_dir_all(data_dir)?;
 
+    // Quick check for existing data before building expensive user index
+    let config = AsterDBConfig {
+        enable_properties: true,
+        enable_recovery: true,
+        enable_metrics: true,
+        ..Default::default()
+    };
+    let aster_db = AsterDB::open_with_config(data_dir, config).await?;
+
+    info!("Checking if database has existing data...");
+    let should_seed = !TwitterDatabase::has_any_data(&aster_db).await?;
+
+    if should_seed {
+        info!("Database is empty, will seed after initialization");
+    } else {
+        info!("Database already contains data, will skip seeding");
+    }
+
+    // Now create the TwitterDatabase (with expensive index building)
     let db = TwitterDatabase::new(data_dir).await?;
     info!("Connected to Aster database at {}", data_dir);
 
-    // Seed the database with sample data
-    info!("Seeding database with sample data...");
-    let seeder = Seeder::new(db.clone());
-    if let Err(e) = seeder.seed_all().await {
-        tracing::warn!(
-            "Failed to seed database: {}. This is normal if the database already contains data.",
-            e
-        );
+    if should_seed {
+        // Seed the database with sample data
+        info!("Seeding database with sample data...");
+        let mut seeder = DatabaseSeeder::new(db.clone());
+
+        // Choose seeding scale based on environment variable or default to small
+        let seed_scale = std::env::var("SEED_SCALE").unwrap_or_else(|_| "small".to_string());
+        let config = match seed_scale.as_str() {
+            "demo" => {
+                info!("Using demo scale: 100 users, 500 posts, 1K comments");
+                SeedConfig::demo_scale()
+            }
+            "small" => {
+                info!("Using small scale: 10K users, 50K posts, 100K comments");
+                SeedConfig::small_scale()
+            }
+            "medium" => {
+                info!("Using medium scale: 100K users, 500K posts, 1M comments");
+                SeedConfig::medium_scale()
+            }
+            "large" => {
+                info!("Using large scale: 1M users, 5M posts, 10M comments");
+                SeedConfig::large_scale()
+            }
+            _ => {
+                info!("Using small scale (default): 10K users, 50K posts, 100K comments");
+                SeedConfig::small_scale()
+            }
+        };
+
+        if let Err(e) = seeder.seed_database(&config).await {
+            tracing::warn!(
+                "Failed to seed database: {}. Continuing with existing data.",
+                e
+            );
+        }
     }
 
     // Wrap database in Arc<RwLock> for sharing across handlers

@@ -107,6 +107,12 @@
             border-radius: 15px;
             padding: 20px;
             margin-bottom: 15px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .post:hover {
+            background-color: #1a1d23;
         }
         
         .post-header {
@@ -285,29 +291,30 @@
                 </div>
             {% else %}
                 {% for post in posts %}
-                    <div class="post">
-                        <div class="post-header">
-                            <div class="post-author">{{ profile_user.display_name }}</div>
-                            <div class="post-username">@{{ profile_user.username }}</div>
-                            <div class="post-time">{{ post.created_at.format("%Y-%m-%d %H:%M") }}</div>
-                        </div>
-                        <div class="post-content">{{ post.content }}</div>
-                        <div class="post-actions">
-                            <a href="/post/{{ post.id }}" class="post-action">
-                                💬 {{ post.comment_count }}
-                            </a>
-                            {% if is_logged_in %}
-                                <a href="/like/{{ post.id }}" class="post-action">
-                                    🤍 {{ post.like_count }}
+                    <a href="/post/{{ post.id }}" style="text-decoration: none; color: inherit;">
+                        <div class="post">
+                            <div class="post-header">
+                                <div class="post-author">{{ profile_user.display_name }}</div>
+                                <div class="post-username">@{{ profile_user.username }}</div>
+                                <div class="post-time">{{ post.created_at.format("%Y-%m-%d %H:%M") }}</div>
+                            </div>
+                            <div class="post-content">{{ post.content }}</div>
+                            <div class="post-actions">
+                                <a href="/post/{{ post.id }}" class="post-action" onclick="event.stopPropagation();">
+                                    💬 {{ post.comment_count }}
                                 </a>
-                            {% else %}
-                                <span class="post-action">
-                                    🤍 {{ post.like_count }}
-                                </span>
-                            {% endif %}
-                            <a href="/post/{{ post.id }}" class="post-action">View</a>
+                                {% if is_logged_in %}
+                                    <a href="/like/{{ post.id }}" class="post-action" onclick="event.stopPropagation();">
+                                        🤍 {{ post.like_count }}
+                                    </a>
+                                {% else %}
+                                    <span class="post-action">
+                                        🤍 {{ post.like_count }}
+                                    </span>
+                                {% endif %}
+                            </div>
                         </div>
-                    </div>
+                    </a>
                 {% endfor %}
             {% endif %}
         </div>

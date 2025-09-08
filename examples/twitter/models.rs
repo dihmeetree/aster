@@ -1,7 +1,6 @@
 use aster_db::{Properties, PropertyValue, VertexId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {

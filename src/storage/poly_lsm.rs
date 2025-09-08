@@ -9,7 +9,9 @@ use crate::storage::{
 };
 use crate::types::PolyLSMConfig;
 use crate::utils::{
-    encoding::{add_edge_deletion_markers, encode_neighbors, get_active_neighbors},
+    encoding::{
+        add_edge_deletion_markers, decode_neighbors, encode_neighbors, encode_neighbors_adaptive, get_active_neighbors,
+    },
     DegreeSketch,
 };
 use crate::{AsterError, Result, Timestamp, VertexId};
@@ -279,8 +281,12 @@ impl PolyLSM {
         all_neighbors.sort_by_key(|v| v.as_u64());
         all_neighbors.dedup();
 
-        // Create new pivot entry
-        let encoded_data = encode_neighbors(&all_neighbors);
+        // Create new pivot entry with adaptive encoding for large neighbor lists
+        let encoded_data = if all_neighbors.len() > 32 {
+            encode_neighbors_adaptive(&all_neighbors).unwrap_or_else(|_| encode_neighbors(&all_neighbors))
+        } else {
+            encode_neighbors(&all_neighbors)
+        };
         let entry = MemTableEntry::new_pivot(encoded_data, Timestamp::now());
 
         self.insert_entry(source, entry).await?;
@@ -319,7 +325,7 @@ impl PolyLSM {
     }
 
     /// Get encoded neighbors for a vertex (for internal use)
-    async fn get_encoded_neighbors(&self, vertex_id: VertexId) -> Result<Vec<u8>> {
+    pub async fn get_encoded_neighbors(&self, vertex_id: VertexId) -> Result<Vec<u8>> {
         // Check active MemTable first
         {
             let memtable = self.active_memtable.read();
@@ -435,6 +441,8 @@ impl PolyLSM {
             return Ok(());
         }
 
+        let flush_start = std::time::Instant::now();
+        
         let sstable_id = {
             let mut next_id = self.next_sstable_id.lock();
             let id = *next_id;
@@ -448,37 +456,56 @@ impl PolyLSM {
 
         // Log memtable stats before flushing
         tracing::info!(
-            "Flushing memtable with {} vertices, {} bytes",
+            "Starting flush: memtable with {} vertices, {} bytes to {}",
             stats.num_vertices,
-            stats.size_bytes
+            stats.size_bytes,
+            sstable_path.display()
         );
 
         let sstable_config = SSTableConfig {
             block_size: self.config.block_size as usize,
             compression_enabled: self.config.compression_enabled,
             bloom_bits_per_key: self.config.bloom_filter_bits_per_key as usize,
-            enable_bloom_filter: true,
+            enable_bloom_filter: true,  // Re-enable optimized bloom filters
             ..SSTableConfig::default()
         };
+        
         let mut writer = SSTableWriter::new(&sstable_path, sstable_config.clone())?;
 
-        // Write all entries
-        for (vertex_id, entry) in memtable.iter() {
-            writer.add_entry(vertex_id, entry)?;
+        let entries = memtable.create_snapshot();
+        
+        // Write all entries from snapshot (no locks held!)
+        for (vertex_id, entry) in entries {
+            writer.add_entry_ref(vertex_id, &entry)?;
         }
 
+        let finish_start = std::time::Instant::now();
         let _metadata = writer.finish()?;
+        tracing::info!("Writer finish took {:?}", finish_start.elapsed());
 
         // Add to level 0
+        let reader_start = std::time::Instant::now();
         let reader = Arc::new(SSTableReader::open(
             &sstable_path,
             sstable_config,
             sstable_id,
         )?);
+        tracing::debug!("Reader creation took {:?}", reader_start.elapsed());
+        
+        let level_start = std::time::Instant::now();
         {
             let mut levels = self.levels.write();
             levels[0].add_sstable(reader);
         }
+        tracing::debug!("Level update took {:?}", level_start.elapsed());
+        
+        let total_flush_time = flush_start.elapsed();
+        tracing::info!(
+            "Completed flush: {} vertices in {:?} ({:.1} vertices/sec)",
+            stats.num_vertices,
+            total_flush_time,
+            stats.num_vertices as f64 / total_flush_time.as_secs_f64()
+        );
 
         Ok(())
     }
@@ -686,34 +713,75 @@ impl PolyLSM {
         // Sort by timestamp (newest first)
         entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-        // Start with empty neighbor set
-        let mut current_neighbors = Vec::new();
+        // Collect all raw neighbor data first, then apply deletion markers at the end
+        let mut all_encoded_data = Vec::new();
 
-        for entry in entries {
-            match entry.entry_type {
-                EntryType::Pivot => {
-                    // Pivot entry replaces all current neighbors (respecting deletion markers)
-                    current_neighbors = get_active_neighbors(&entry.data)?;
-                    break; // Pivot is authoritative, stop processing
+        // Find the newest pivot (if any) and collect all deltas newer than it
+        let mut found_pivot_index = None;
+        for (i, entry) in entries.iter().enumerate() {
+            if matches!(entry.entry_type, EntryType::Pivot) {
+                found_pivot_index = Some(i);
+                break;
+            }
+            if matches!(entry.entry_type, EntryType::Tombstone) {
+                return Ok(Vec::new());
+            }
+        }
+
+        match found_pivot_index {
+            Some(pivot_idx) => {
+                // Start with the pivot data
+                all_encoded_data.push(entries[pivot_idx].data.clone());
+
+                // Apply all delta entries that are newer than the pivot (0 to pivot_idx-1)
+                for i in 0..pivot_idx {
+                    if matches!(entries[i].entry_type, EntryType::Delta) {
+                        all_encoded_data.push(entries[i].data.clone());
+                    }
                 }
-                EntryType::Delta => {
-                    // Delta entry adds to current neighbors (respecting deletion markers)
-                    let delta_neighbors = get_active_neighbors(&entry.data)?;
-                    current_neighbors.extend(delta_neighbors);
-                }
-                EntryType::Tombstone => {
-                    // Tombstone marks deletion
-                    current_neighbors.clear();
-                    break;
+            }
+            None => {
+                // No pivot found, collect all deltas
+                for entry in entries {
+                    match entry.entry_type {
+                        EntryType::Delta => {
+                            all_encoded_data.push(entry.data);
+                        }
+                        EntryType::Tombstone => {
+                            return Ok(Vec::new());
+                        }
+                        EntryType::Pivot => unreachable!(),
+                    }
                 }
             }
         }
 
-        // Remove duplicates and sort
-        current_neighbors.sort_by_key(|v| v.as_u64());
-        current_neighbors.dedup();
+        // Now combine all the encoded data and apply deletion markers
+        if all_encoded_data.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        Ok(current_neighbors)
+        // Decode all neighbors from all entries
+        let mut all_neighbors = Vec::new();
+        for encoded in &all_encoded_data {
+            let neighbors = decode_neighbors(encoded)?;
+            all_neighbors.extend(neighbors);
+        }
+
+        // Encode combined neighbors with adaptive encoding for large lists
+        let combined_encoded = if all_neighbors.len() > 32 {
+            encode_neighbors_adaptive(&all_neighbors).unwrap_or_else(|_| encode_neighbors(&all_neighbors))
+        } else {
+            encode_neighbors(&all_neighbors)
+        };
+        let final_neighbors = get_active_neighbors(&combined_encoded)?;
+
+        // Remove duplicates and sort
+        let mut result = final_neighbors;
+        result.sort_by_key(|v| v.as_u64());
+        result.dedup();
+
+        Ok(result)
     }
 
     /// Check if a vertex exists

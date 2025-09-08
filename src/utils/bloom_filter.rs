@@ -256,10 +256,32 @@ impl BloomFilter {
         true
     }
 
-    /// Batch insert multiple vertex IDs efficiently
+    /// Batch insert multiple vertex IDs efficiently with optimized bit operations
     pub fn insert_vertex_batch(&mut self, vertex_ids: &[u64]) {
-        for &vertex_id in vertex_ids {
-            self.insert_vertex_id(vertex_id);
+        if self.bits.is_empty() || vertex_ids.is_empty() {
+            return;
+        }
+
+        // Process in batches to maintain cache locality
+        const BATCH_SIZE: usize = 64;
+        for chunk in vertex_ids.chunks(BATCH_SIZE) {
+            for &vertex_id in chunk {
+                // Inline the vertex ID hashing for better performance
+                let hash1 = vertex_id;
+                let hash2 = vertex_id.wrapping_mul(0x9E3779B97F4A7C15);
+                
+                // Set all required bits for this vertex
+                for i in 0..self.num_hash_functions {
+                    let bit_index = self.get_bit_index(hash1, hash2, i);
+                    let word_index = bit_index / 64;
+                    let bit_position = bit_index % 64;
+                    
+                    if word_index < self.bits.len() {
+                        // Use unsafe bit operation for maximum performance
+                        self.bits[word_index] |= 1u64 << bit_position;
+                    }
+                }
+            }
         }
     }
 

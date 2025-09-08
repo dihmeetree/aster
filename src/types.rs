@@ -485,6 +485,22 @@ impl PolyLSMConfig {
         }
     }
 
+    /// Create a configuration optimized for fast seeding/bulk loading
+    pub fn fast_seeding() -> Self {
+        Self {
+            level_size_ratio: 10,
+            max_levels: 4,
+            block_size: 4096,
+            bloom_filter_bits_per_key: 8, // Fewer bloom filter bits for faster writes
+            degree_sketch_bits_per_vertex: 8,
+            memtable_size: 16 * 1024 * 1024, // Small 16MB memtable for frequent flushes
+            compression_enabled: true,       // Re-enable compression now that I/O is optimized
+            lookup_ratio: 0.5,
+            average_degree: 32.0,
+            enable_1_leveling: false,
+        }
+    }
+
     /// Get a summary of paper-specified parameters
     pub fn paper_parameter_summary(&self) -> String {
         let leveling_info = if self.enable_1_leveling {
@@ -506,7 +522,7 @@ impl PolyLSMConfig {
 
 impl Default for PolyLSMConfig {
     fn default() -> Self {
-        Self::paper_specification()
+        Self::fast_seeding()  // Use fast seeding configuration for better bulk loading performance
     }
 }
 

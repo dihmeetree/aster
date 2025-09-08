@@ -291,24 +291,35 @@ pub fn encode_neighbors_compressed(neighbors: &[VertexId]) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
 
-    // Use Partitioned Elias-Fano for better compression on large lists
-    let config = EliasFanoConfig {
-        segment_count: calculate_optimal_segments(neighbors.len()),
-        prefix_length: 0, // Auto-calculate
-        max_segment_size: 4096,
-        min_segment_size: 64,
-        use_optimal_allocation: true,
+    // Use optimized configurations based on list size
+    let config = match neighbors.len() {
+        0..=64 => EliasFanoConfig::small_lists(),
+        65..=512 => EliasFanoConfig {
+            segment_count: 4,
+            prefix_length: 0,
+            max_segment_size: 2048,
+            min_segment_size: 16,
+            use_optimal_allocation: true,
+        },
+        513..=2048 => EliasFanoConfig {
+            segment_count: 8,
+            prefix_length: 0,
+            max_segment_size: 4096,
+            min_segment_size: 32,
+            use_optimal_allocation: true,
+        },
+        _ => EliasFanoConfig::large_lists(),
     };
 
     let elias_fano = PartitionedEliasFano::encode(neighbors, config)?;
 
-    // Serialize to bytes
-    let mut encoded = Vec::new();
+    // Serialize to bytes with optimized bincode configuration
+    let mut encoded = Vec::with_capacity(neighbors.len() / 2); // Estimate compressed size
 
     // Write header indicating this uses Elias-Fano encoding
     encoded.push(0xFF); // Magic byte for Elias-Fano format
 
-    // Serialize the compressed structure
+    // Serialize the compressed structure using standard bincode
     let serialized = bincode::serialize(&elias_fano)
         .map_err(|e| AsterError::storage(&format!("Failed to serialize Elias-Fano: {}", e)))?;
 
@@ -342,20 +353,36 @@ pub fn encode_neighbors_adaptive(neighbors: &[VertexId]) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
 
-    // For small lists, use basic encoding to avoid compression overhead
-    if neighbors.len() < 32 {
+    // For very small lists, use basic encoding to avoid compression overhead
+    if neighbors.len() < 16 {
         return Ok(encode_neighbors(neighbors));
     }
 
-    // For larger lists, try both encodings and use the better one
-    let basic_encoded = encode_neighbors(neighbors);
-    let compressed_encoded = encode_neighbors_compressed(neighbors)?;
-
-    if compressed_encoded.len() < basic_encoded.len() {
-        Ok(compressed_encoded)
-    } else {
-        Ok(basic_encoded)
+    // For medium lists (16-128), use heuristics to predict compression benefit
+    if neighbors.len() <= 128 {
+        // Check if the data is clustered (good for compression)
+        let mut sorted_neighbors = neighbors.to_vec();
+        sorted_neighbors.sort_unstable();
+        
+        let avg_gap = if sorted_neighbors.len() > 1 {
+            let total_range = sorted_neighbors.last().unwrap().as_u64() 
+                            - sorted_neighbors.first().unwrap().as_u64();
+            total_range as f64 / (sorted_neighbors.len() - 1) as f64
+        } else {
+            0.0
+        };
+        
+        // If average gap is small (clustered data), use compression
+        // If gaps are large (sparse data), use basic encoding
+        if avg_gap < 1000.0 {
+            return encode_neighbors_compressed(neighbors);
+        } else {
+            return Ok(encode_neighbors(neighbors));
+        }
     }
+
+    // For large lists (>128), always use compression as it's likely beneficial
+    encode_neighbors_compressed(neighbors)
 }
 
 /// Decode neighbors with automatic format detection

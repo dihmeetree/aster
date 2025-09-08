@@ -168,19 +168,72 @@ impl MemTable {
 
     /// Get an iterator over all entries for flushing to disk
     pub fn iter(&self) -> MemTableIterator {
+        tracing::debug!("Starting memtable iteration with {} entries", self.num_entries());
+        let iter_start = std::time::Instant::now();
+        
         let data = self.data.read();
+        tracing::debug!("Acquired read lock in {:?}", iter_start.elapsed());
+        
         let mut all_entries = Vec::new();
+        let clone_start = std::time::Instant::now();
 
         for (&vertex_id, entries) in data.iter() {
             for entry in entries {
                 all_entries.push((vertex_id, entry.clone()));
             }
         }
+        tracing::debug!("Cloned {} entries in {:?}", all_entries.len(), clone_start.elapsed());
 
         // Sort by vertex ID for efficient storage
+        let sort_start = std::time::Instant::now();
         all_entries.sort_by_key(|(vertex_id, _)| *vertex_id);
+        tracing::debug!("Sorted entries in {:?}", sort_start.elapsed());
+        
+        tracing::debug!("Total memtable iteration took {:?}", iter_start.elapsed());
 
         MemTableIterator::new(all_entries)
+    }
+
+    /// Get a streaming iterator that doesn't clone all data upfront
+    pub fn streaming_iter(&self) -> MemTableStreamingIterator<'_> {
+        tracing::debug!("Starting streaming iteration with {} entries", self.num_entries());
+        let data = self.data.read();
+        MemTableStreamingIterator::new(data)
+    }
+    
+    /// Create a complete snapshot of the memtable that can be processed without holding locks
+    pub fn create_snapshot(&self) -> Vec<(VertexId, MemTableEntry)> {
+        tracing::info!("Creating memtable snapshot with {} entries", self.num_entries());
+        let snapshot_start = std::time::Instant::now();
+        
+        // This is the critical section - we want to minimize time holding the lock
+        let snapshot = {
+            let data = self.data.read();
+            tracing::info!("Acquired read lock for snapshot creation");
+            
+            let mut entries = Vec::new();
+            
+            // Clone all entries while holding the lock (unavoidable for consistency)
+            for (&vertex_id, vertex_entries) in data.iter() {
+                for entry in vertex_entries {
+                    entries.push((vertex_id, entry.clone()));
+                }
+            }
+            
+            tracing::info!("Cloned {} entries while holding lock in {:?}", entries.len(), snapshot_start.elapsed());
+            entries
+        }; // Lock is released here - no more lock contention!
+        
+        tracing::info!("Lock released, now sorting {} entries", snapshot.len());
+        
+        // Sort outside the critical section
+        let sort_start = std::time::Instant::now();
+        let mut sorted_snapshot = snapshot;
+        sorted_snapshot.sort_by_key(|(vertex_id, _)| *vertex_id);
+        tracing::info!("Sorted {} entries in {:?}", sorted_snapshot.len(), sort_start.elapsed());
+        
+        tracing::info!("Total snapshot creation took {:?}", snapshot_start.elapsed());
+        sorted_snapshot
     }
 
     /// Get statistics about this MemTable
@@ -276,6 +329,52 @@ impl Iterator for MemTableIterator {
 impl ExactSizeIterator for MemTableIterator {
     fn len(&self) -> usize {
         self.entries.len() - self.index
+    }
+}
+
+/// Streaming iterator over MemTable entries that doesn't clone all data upfront
+pub struct MemTableStreamingIterator<'a> {
+    data: parking_lot::RwLockReadGuard<'a, std::collections::BTreeMap<VertexId, Vec<MemTableEntry>>>,
+    sorted_keys: Vec<VertexId>,
+    key_index: usize,
+    entry_index: usize,
+}
+
+impl<'a> MemTableStreamingIterator<'a> {
+    fn new(data: parking_lot::RwLockReadGuard<'a, std::collections::BTreeMap<VertexId, Vec<MemTableEntry>>>) -> Self {
+        // Only collect the keys, not the entire data
+        let sorted_keys: Vec<VertexId> = data.keys().cloned().collect();
+        
+        Self {
+            data,
+            sorted_keys,
+            key_index: 0,
+            entry_index: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for MemTableStreamingIterator<'a> {
+    type Item = (VertexId, MemTableEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.key_index < self.sorted_keys.len() {
+            let vertex_id = self.sorted_keys[self.key_index];
+            
+            if let Some(entries) = self.data.get(&vertex_id) {
+                if self.entry_index < entries.len() {
+                    let entry = entries[self.entry_index].clone();
+                    self.entry_index += 1;
+                    return Some((vertex_id, entry));
+                }
+            }
+            
+            // Move to next vertex
+            self.key_index += 1;
+            self.entry_index = 0;
+        }
+        
+        None
     }
 }
 

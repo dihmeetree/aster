@@ -218,6 +218,7 @@ pub struct SSTableWriter {
     current_block_size: usize,
     blocks_written: Vec<IndexEntry>,
     bloom_filter: BloomFilter,
+    bloom_batch: Vec<u64>, // Batch vertex IDs for efficient bloom filter insertion
     first_key: Option<VertexId>,
     last_key: Option<VertexId>,
     num_entries: u64,
@@ -227,28 +228,37 @@ pub struct SSTableWriter {
 impl SSTableWriter {
     /// Create a new SSTable writer
     pub fn new<P: AsRef<Path>>(path: P, config: SSTableConfig) -> Result<Self> {
+        tracing::debug!("Creating SSTableWriter at path: {}", path.as_ref().display());
         let path = path.as_ref().to_path_buf();
+        
+        let file_start = std::time::Instant::now();
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&path)?;
+        tracing::debug!("File creation took {:?}", file_start.elapsed());
 
+        let bloom_start = std::time::Instant::now();
         let bloom_filter = if config.enable_bloom_filter {
-            // Use vertex-optimized Bloom filter with target 1% false positive rate
-            BloomFilter::for_vertices(10000, 0.01)
+            // Size bloom filter generously to handle large datasets efficiently
+            // Use estimated capacity significantly larger than expected entries
+            let estimated_capacity = 500_000; // Support up to 500K entries with good performance
+            BloomFilter::for_vertices(estimated_capacity, 0.01)
         } else {
             BloomFilter::new(1, 1) // Minimal bloom filter
         };
+        tracing::debug!("Bloom filter creation took {:?}", bloom_start.elapsed());
 
         Ok(Self {
-            file: BufWriter::new(file),
+            file: BufWriter::with_capacity(1024 * 1024, file), // Use 1MB buffer instead of default
             path,
             config,
             current_block: DataBlock::new(),
             current_block_size: 0,
             blocks_written: Vec::new(),
             bloom_filter,
+            bloom_batch: Vec::with_capacity(1000), // Pre-allocate for batch processing
             first_key: None,
             last_key: None,
             num_entries: 0,
@@ -258,6 +268,17 @@ impl SSTableWriter {
 
     /// Add an entry to the SSTable
     pub fn add_entry(&mut self, vertex_id: VertexId, entry: MemTableEntry) -> Result<()> {
+        self.add_entry_ref(vertex_id, &entry)
+    }
+    
+    /// Add an entry to the SSTable from a reference (more efficient)
+    pub fn add_entry_ref(&mut self, vertex_id: VertexId, entry: &MemTableEntry) -> Result<()> {
+        if self.num_entries == 0 {
+            tracing::debug!("Adding first entry to SSTable: vertex_id={}", vertex_id);
+        } else if self.num_entries % 1000 == 0 {
+            tracing::debug!("Added {} entries so far", self.num_entries);
+        }
+        
         // Update first/last keys
         if self.first_key.is_none() || vertex_id < self.first_key.unwrap() {
             self.first_key = Some(vertex_id);
@@ -266,37 +287,19 @@ impl SSTableWriter {
             self.last_key = Some(vertex_id);
         }
 
-        // Add to bloom filter
+        // Add to bloom filter batch
         if self.config.enable_bloom_filter {
-            self.bloom_filter.insert_vertex_id(vertex_id.as_u64());
+            self.bloom_batch.push(vertex_id.as_u64());
+            
+            // Process bloom filter batch when it gets large enough
+            if self.bloom_batch.len() >= 1000 {
+                self.flush_bloom_batch();
+            }
         }
 
-        // For pivot entries with neighbor data, try to compress using adaptive encoding
-        let optimized_entry =
-            if matches!(entry.entry_type, EntryType::Pivot) && !entry.data.is_empty() {
-                // Try to decode as neighbor list and re-encode with adaptive compression
-                if let Ok(neighbors) = decode_neighbors_adaptive(&entry.data) {
-                    if let Ok(compressed_data) = encode_neighbors_adaptive(&neighbors) {
-                        let stats = get_encoding_stats(&neighbors, &compressed_data);
-                        // Only use compressed version if it's meaningfully smaller
-                        if stats.compression_ratio < 0.9 {
-                            MemTableEntry {
-                                entry_type: entry.entry_type.clone(),
-                                data: compressed_data,
-                                timestamp: entry.timestamp,
-                            }
-                        } else {
-                            entry
-                        }
-                    } else {
-                        entry
-                    }
-                } else {
-                    entry
-                }
-            } else {
-                entry
-            };
+        // Skip adaptive encoding during flushing to avoid performance regression
+        // This optimization should be applied at a higher level where we know the data type
+        let optimized_entry = entry.clone();
 
         // Estimate entry size
         let entry_size = std::mem::size_of::<VertexId>() + optimized_entry.size_bytes();
@@ -316,22 +319,35 @@ impl SSTableWriter {
 
     /// Flush the current data block
     fn flush_current_block(&mut self) -> Result<()> {
+        tracing::info!("BLOCK DEBUG: Flushing block with {} entries", self.current_block.entries.len());
         if self.current_block.entries.is_empty() {
+            tracing::info!("BLOCK DEBUG: Block is empty, skipping flush");
             return Ok(());
         }
 
         // Sort entries by vertex ID
+        tracing::info!("BLOCK DEBUG: Sorting {} entries", self.current_block.entries.len());
         self.current_block.entries.sort_by_key(|(id, _)| *id);
 
         let first_key = self.current_block.entries.first().unwrap().0;
         let last_key = self.current_block.entries.last().unwrap().0;
 
         // Serialize block and track if actually compressed
+        tracing::info!("BLOCK DEBUG: Serializing block data");
+        let serialize_start = std::time::Instant::now();
         let uncompressed_data = bincode::serialize(&self.current_block.entries)?;
+        tracing::info!("BLOCK DEBUG: Serialization took {:?}, {} bytes", serialize_start.elapsed(), uncompressed_data.len());
+        
+        tracing::info!("BLOCK DEBUG: Checking compression (enabled: {})", self.config.compression_enabled);
         let (block_data, was_compressed) =
             if self.config.compression_enabled && uncompressed_data.len() > 1024 {
-                (self.current_block.compress_data(&uncompressed_data)?, true)
+                tracing::info!("BLOCK DEBUG: Compressing {} bytes", uncompressed_data.len());
+                let compress_start = std::time::Instant::now();
+                let compressed = self.current_block.compress_data(&uncompressed_data)?;
+                tracing::info!("BLOCK DEBUG: Compression took {:?}", compress_start.elapsed());
+                (compressed, true)
             } else {
+                tracing::info!("BLOCK DEBUG: Skipping compression");
                 (uncompressed_data, false)
             };
 
@@ -346,8 +362,26 @@ impl SSTableWriter {
 
         // Write header and data
         let header_bytes = header.serialize();
+        tracing::info!("BLOCK DEBUG: About to write header ({} bytes)", header_bytes.len());
+        let header_write_start = std::time::Instant::now();
         self.file.write_all(&header_bytes)?;
+        tracing::info!("BLOCK DEBUG: Header write took {:?}", header_write_start.elapsed());
+        
+        tracing::info!("BLOCK DEBUG: About to write block data ({} bytes)", block_data.len());
+        let data_write_start = std::time::Instant::now();
         self.file.write_all(&block_data)?;
+        tracing::info!("BLOCK DEBUG: Block data write took {:?}", data_write_start.elapsed());
+        tracing::info!("BLOCK DEBUG: About to create index entry");
+
+        // Periodically flush the buffer to avoid blocking on large writes
+        if self.blocks_written.len() % 50 == 0 && self.blocks_written.len() > 0 {
+            tracing::info!("BLOCK DEBUG: Flushing buffer after {} blocks", self.blocks_written.len());
+            let flush_start = std::time::Instant::now();
+            self.file.flush()?;
+            tracing::info!("BLOCK DEBUG: Buffer flush took {:?}", flush_start.elapsed());
+        }
+
+        tracing::info!("BLOCK DEBUG: Creating index entry for block");
 
         // Create index entry
         let index_entry = IndexEntry {
@@ -359,24 +393,49 @@ impl SSTableWriter {
 
         self.blocks_written.push(index_entry);
         self.current_offset += (header_bytes.len() + block_data.len()) as u64;
+        tracing::info!("BLOCK DEBUG: Index entry created, offset updated to {}", self.current_offset);
 
         // Reset current block
         self.current_block = DataBlock::new();
         self.current_block_size = 0;
+        tracing::info!("BLOCK DEBUG: Block flush complete, {} total blocks written", self.blocks_written.len());
 
         Ok(())
     }
 
+    /// Flush the accumulated bloom filter batch
+    fn flush_bloom_batch(&mut self) {
+        if !self.bloom_batch.is_empty() {
+            self.bloom_filter.insert_vertex_batch(&self.bloom_batch);
+            self.bloom_batch.clear();
+        }
+    }
+
     /// Finish writing the SSTable
     pub fn finish(mut self) -> Result<SSTableMetadata> {
+        let finish_start = std::time::Instant::now();
+        tracing::info!("FINISH DEBUG: ==== ENTERING FINISH METHOD ====");
+        tracing::info!("FINISH DEBUG: Starting SSTable finish with {} entries", self.num_entries);
+        
         // Flush any remaining data
+        tracing::info!("FINISH DEBUG: About to flush final block");
+        let flush_start = std::time::Instant::now();
         self.flush_current_block()?;
+        tracing::info!("FINISH DEBUG: Final block flush took {:?}", flush_start.elapsed());
+
+        // Flush any remaining bloom filter entries
+        tracing::info!("FINISH DEBUG: Flushing remaining bloom filter batch ({} entries)", self.bloom_batch.len());
+        let bloom_flush_start = std::time::Instant::now();
+        self.flush_bloom_batch();
+        tracing::info!("FINISH DEBUG: Bloom batch flush took {:?}", bloom_flush_start.elapsed());
 
         if self.num_entries == 0 {
             return Err(AsterError::invalid_operation("Cannot create empty SSTable"));
         }
 
         // Write index block
+        tracing::info!("FINISH DEBUG: About to write index block with {} blocks", self.blocks_written.len());
+        let index_start = std::time::Instant::now();
         let index_offset = self.current_offset;
         let index_data = bincode::serialize(&self.blocks_written)?;
         let index_header = BlockHeader::new(
@@ -390,11 +449,16 @@ impl SSTableWriter {
         self.file.write_all(&index_data)?;
         let index_size = index_header.serialize().len() + index_data.len();
         self.current_offset += index_size as u64;
+        tracing::debug!("Index block write took {:?}", index_start.elapsed());
 
         // Write bloom filter block (if enabled)
+        let bloom_start = std::time::Instant::now();
         let bloom_offset = self.current_offset;
         let bloom_size = if self.config.enable_bloom_filter {
+            tracing::info!("FINISH DEBUG: About to serialize bloom filter");
+            let bloom_serialize_start = std::time::Instant::now();
             let bloom_data = self.bloom_filter.to_bytes();
+            tracing::info!("FINISH DEBUG: Bloom filter serialization took {:?}, {} bytes", bloom_serialize_start.elapsed(), bloom_data.len());
             let bloom_header = BlockHeader::new(
                 BlockType::MetaIndex,
                 0,
@@ -410,6 +474,7 @@ impl SSTableWriter {
         } else {
             0
         };
+        tracing::debug!("Bloom filter write took {:?}", bloom_start.elapsed());
 
         // Create metadata
         let data_size = self.current_offset; // Total size of data blocks
@@ -432,14 +497,19 @@ impl SSTableWriter {
         };
 
         // Write metadata
+        let metadata_start = std::time::Instant::now();
         let metadata_data = bincode::serialize(&metadata)?;
         let metadata_size = metadata_data.len() as u32;
 
         // Write metadata and size at the end
         self.file.write_all(&metadata_data)?;
         self.file.write_all(&metadata_size.to_le_bytes())?;
+        tracing::debug!("Metadata write took {:?}", metadata_start.elapsed());
 
         self.file.flush()?;
+        
+        let total_finish_time = finish_start.elapsed();
+        tracing::info!("SSTable finish total time: {:?}", total_finish_time);
 
         Ok(metadata)
     }
