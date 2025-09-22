@@ -1,5 +1,11 @@
 # Aster Graph Database
 
+> **Notice**: This project is an implementation inspired by the research paper  
+> [**"Aster: Enhancing LSM-structures for Scalable Graph Database"**](https://dl.acm.org/doi/pdf/10.1145/3709662)  
+> by *Dingheng Mo, Junfeng Liu, Fan Wang, and Siqiang Luo* (ACM SIGMOD 2025).  
+> The design, algorithms, and cost model in this repository are based on the paper’s contributions,  
+> faithfully adapted into a Rust implementation.
+
 A high-performance graph database built with Rust, featuring the innovative **Poly-LSM** storage engine. Aster is designed for large-scale, evolving graphs with intensive updates and lookups.
 
 ## 🚀 Key Features
