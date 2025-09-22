@@ -474,7 +474,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/aster.git
+git clone https://github.com/dihmeetree/aster.git
 cd aster
 cargo build
 cargo test --all
