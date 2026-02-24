@@ -1,4 +1,6 @@
-# Aster Graph Database
+<p align="center">
+  <img src="https://i.ibb.co/N2Hq67P5/IMG-0691.jpg" alt="Aster" width="850">
+</p>
 
 A high-performance graph database built with Rust, featuring the innovative **Poly-LSM** storage engine. Aster is designed for large-scale, evolving graphs with intensive updates and lookups.
 
